@@ -1,0 +1,57 @@
+# Multi Video Conferencing App
+
+Contract-first backend scaffold for Multi Video Conferencing App aligned to `MEDIASOUP_ONLY_VC_PLAN.md`.
+
+## Implemented in this increment
+
+- VC API v1 endpoint stubs:
+  - `POST /v1/sessions`
+  - `POST /v1/sessions/{sessionId}/join-token`
+  - `GET /v1/ice-servers`
+  - `GET /v1/sessions/{sessionId}/participants`
+  - `POST /v1/sessions/{sessionId}/leave`
+  - `GET /v1/sessions/{sessionId}`
+  - `GET /healthz`, `GET /readyz`, `GET /metrics`
+- WebSocket endpoint: `GET /v1/ws`
+- Join token validation with replay protection (`jti` single-use), with optional Redis-backed distributed replay store.
+- In-memory session and participant store with TTL sweeper.
+- Mediasoup worker startup and per-session router lifecycle.
+- Optional API key protection for admin/control REST routes (`VC_API_KEY`).
+- Reconnect grace handling (`VC_RECONNECT_GRACE_SECONDS`) with state transition to `reconnecting`.
+- Distributed reconnect cleanup worker with Redis lock ownership (`VC_RECONNECT_CLEANUP_*`).
+- Structured event emission (`EVENT_JSON`) for `session_created`, `participant_joined`, `participant_left`, `session_ended`.
+- Quality telemetry ingest (`qualityReport`) with Prometheus metrics and `quality_alert` events.
+- Optional Kafka publishing for emitted events (`KAFKA_BROKERS`, `KAFKA_EVENTS_TOPIC`).
+- Optional Postgres read model persistence for events (`DATABASE_URL`).
+- WebRTC transport/producers/consumers flow over WS:
+  - `createTransport`
+  - `connectTransport`
+  - `produce`
+  - `listProducers`
+  - `consume`
+  - `pauseProducer` / `resumeProducer`
+- OpenAPI contract and WS schema under `contracts/`.
+- Admin read-model endpoints:
+  - `GET /v1/admin/sessions`
+  - `GET /v1/admin/sessions/{sessionId}/events`
+
+## Not yet implemented
+
+- TURN REST short-lived credential issuance.
+
+## Run
+
+1. Copy `.env.example` to `.env` and update values.
+2. Install dependencies:
+
+```bash
+npm install
+```
+
+3. Start server:
+
+```bash
+npm run dev
+```
+
+Server default URL: `http://localhost:9000`

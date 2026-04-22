@@ -1,0 +1,282 @@
+openapi: 3.0.3
+info:
+  title: VC API
+  version: 1.0.0
+  description: Mediasoup-only VC API v1
+servers:
+  - url: http://localhost:9000
+paths:
+  /healthz:
+    get:
+      summary: Liveness check
+      responses:
+        "200":
+          description: OK
+  /readyz:
+    get:
+      summary: Readiness check
+      responses:
+        "200":
+          description: Ready
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      responses:
+        "200":
+          description: Metrics payload
+  /v1/sessions:
+    post:
+      summary: Create session
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+      responses:
+        "201":
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateSessionResponse"
+  /v1/sessions/{sessionId}:
+    get:
+      summary: Get session state
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Session state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionState"
+        "404":
+          description: Not found
+    post:
+      summary: Reserved
+      responses:
+        "405":
+          description: Method not allowed
+  /v1/sessions/{sessionId}/join-token:
+    post:
+      summary: Issue participant join token
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JoinTokenRequest"
+      responses:
+        "200":
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JoinTokenResponse"
+        "404":
+          description: Session not found
+  /v1/ice-servers:
+    get:
+      summary: Get ICE servers for session
+      parameters:
+        - in: query
+          name: sessionId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ICE servers returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IceServersResponse"
+        "404":
+          description: Session not found
+  /v1/sessions/{sessionId}/participants:
+    get:
+      summary: List participants
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Participant list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParticipantsResponse"
+        "404":
+          description: Session not found
+  /v1/sessions/{sessionId}/leave:
+    post:
+      summary: Leave/end session
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Session ended
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LeaveResponse"
+        "404":
+          description: Session not found
+
+components:
+  parameters:
+    SessionId:
+      in: path
+      name: sessionId
+      required: true
+      schema:
+        type: string
+  schemas:
+    CreateSessionRequest:
+      type: object
+      properties:
+        externalRef:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+        ttlSeconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+    CreateSessionResponse:
+      type: object
+      required: [sessionId, status, createdAt, expiresAt]
+      properties:
+        sessionId:
+          type: string
+        status:
+          type: string
+          enum: [created, active, idle, ended]
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+    JoinTokenRequest:
+      type: object
+      required: [participantId, role]
+      properties:
+        participantId:
+          type: string
+        role:
+          type: string
+          enum: [agent, customer]
+        displayName:
+          type: string
+        ttlSeconds:
+          type: integer
+          minimum: 30
+          maximum: 900
+    JoinTokenResponse:
+      type: object
+      required: [token, expiresAt, wsUrl, sessionId]
+      properties:
+        token:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        wsUrl:
+          type: string
+        sessionId:
+          type: string
+    IceServer:
+      type: object
+      required: [urls]
+      properties:
+        urls:
+          type: array
+          items:
+            type: string
+        username:
+          type: string
+        credential:
+          type: string
+        credentialType:
+          type: string
+          enum: [password]
+    IceServersResponse:
+      type: object
+      required: [iceServers, ttlSeconds]
+      properties:
+        iceServers:
+          type: array
+          items:
+            $ref: "#/components/schemas/IceServer"
+        ttlSeconds:
+          type: integer
+    Participant:
+      type: object
+      required: [participantId, role, state]
+      properties:
+        participantId:
+          type: string
+        role:
+          type: string
+          enum: [agent, customer]
+        displayName:
+          type: string
+          nullable: true
+        state:
+          type: string
+        joinedAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ParticipantsResponse:
+      type: object
+      required: [participants, total]
+      properties:
+        participants:
+          type: array
+          items:
+            $ref: "#/components/schemas/Participant"
+        total:
+          type: integer
+    SessionState:
+      type: object
+      required: [sessionId, status, createdAt, expiresAt, lastActivityAt, participantCount]
+      properties:
+        sessionId:
+          type: string
+        status:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        lastActivityAt:
+          type: string
+          format: date-time
+        participantCount:
+          type: integer
+        metadata:
+          type: object
+          additionalProperties: true
+    LeaveResponse:
+      type: object
+      required: [sessionId, status, endedAt]
+      properties:
+        sessionId:
+          type: string
+        status:
+          type: string
+          enum: [ended]
+        endedAt:
+          type: string
+          format: date-time
