@@ -88,6 +88,8 @@ function setupWebSocketServer({
 
   wss.on("connection", (ws) => {
     send(ws, "connected", { version: "v1" });
+    // eslint-disable-next-line no-console
+    console.log("[ws] client_connected");
 
     ws.on("message", async (rawData) => {
       let msg;
@@ -100,6 +102,10 @@ function setupWebSocketServer({
 
       try {
         const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
+        // eslint-disable-next-line no-console
+        console.log(
+          `[ws] recv event=${msg?.event || "unknown"} requestId=${requestId || "none"} session=${ws.sessionId || "n/a"} participant=${ws.participantId || "n/a"}`
+        );
         const payloadValidation = validateEventPayload(msg.event, msg.data || {});
         if (!payloadValidation.ok && msg.event !== "listProducers" && msg.event !== "leave") {
           send(ws, "error", { code: payloadValidation.code, detail: payloadValidation.detail }, requestId);
@@ -154,6 +160,8 @@ function setupWebSocketServer({
             role: claims.role,
             routerRtpCapabilities: mediasoupService.getRouterRtpCapabilities(claims.sid)
           }, requestId);
+          // eslint-disable-next-line no-console
+          console.log(`[ws] joined session=${claims.sid} participant=${claims.sub} role=${claims.role}`);
           return;
         }
 
@@ -168,6 +176,10 @@ function setupWebSocketServer({
             ws.participantId,
             direction
           );
+          // eslint-disable-next-line no-console
+          console.log(
+            `[ws] transport_created session=${ws.sessionId} participant=${ws.participantId} direction=${direction} transportId=${transport.id}`
+          );
           send(ws, "transportCreated", { direction, ...transport }, requestId);
           return;
         }
@@ -180,6 +192,10 @@ function setupWebSocketServer({
           const transportId = msg?.data?.transportId;
           const dtlsParameters = msg?.data?.dtlsParameters;
           await mediasoupService.connectTransport(ws.sessionId, ws.participantId, transportId, dtlsParameters);
+          // eslint-disable-next-line no-console
+          console.log(
+            `[ws] transport_connected session=${ws.sessionId} participant=${ws.participantId} transportId=${transportId}`
+          );
           send(ws, "ack", { event: "connectTransport", transportId }, requestId);
           return;
         }
@@ -199,6 +215,10 @@ function setupWebSocketServer({
             kind,
             rtpParameters
           );
+          // eslint-disable-next-line no-console
+          console.log(
+            `[ws] produced session=${ws.sessionId} participant=${ws.participantId} transportId=${transportId} kind=${kind} producerId=${produced.producerId}`
+          );
           send(ws, "produced", produced, requestId);
           return;
         }
@@ -217,6 +237,10 @@ function setupWebSocketServer({
             transportId,
             producerId,
             rtpCapabilities
+          );
+          // eslint-disable-next-line no-console
+          console.log(
+            `[ws] consumed session=${ws.sessionId} participant=${ws.participantId} transportId=${transportId} producerId=${producerId} consumerId=${consumed.consumerId}`
           );
           send(ws, "consumed", consumed, requestId);
           return;
@@ -311,11 +335,17 @@ function setupWebSocketServer({
       } catch (error) {
         backendErrorsTotal.inc({ area: "ws_message_handler" });
         const requestId = typeof msg?.requestId === "string" ? msg.requestId : undefined;
+        // eslint-disable-next-line no-console
+        console.error(
+          `[ws] handler_error event=${msg?.event || "unknown"} requestId=${requestId || "none"} session=${ws.sessionId || "n/a"} participant=${ws.participantId || "n/a"} error=${error.message}`
+        );
         send(ws, "error", { code: "internal_error", detail: error.message }, requestId);
       }
     });
 
     ws.on("close", async () => {
+      // eslint-disable-next-line no-console
+      console.log(`[ws] client_closed session=${ws.sessionId || "n/a"} participant=${ws.participantId || "n/a"}`);
       if (ws.sessionId && ws.participantId) {
         sessionStore.setParticipantState(ws.sessionId, ws.participantId, "reconnecting");
         reconnectAttemptsTotal.inc();
