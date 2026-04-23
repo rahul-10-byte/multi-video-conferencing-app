@@ -92,7 +92,8 @@ class MediasoupService {
       listenIps: [
         {
           ip: this.config.listenIp,
-          announcedAddress: this.config.announcedAddress || undefined
+          // mediasoup WebRtcTransport expects announcedIp for public candidate advertisement.
+          announcedIp: this.config.announcedAddress || undefined
         }
       ],
       enableUdp: true,
