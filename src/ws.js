@@ -176,9 +176,20 @@ function setupWebSocketServer({
             ws.participantId,
             direction
           );
+          const candidateSummary = Array.isArray(transport.iceCandidates)
+            ? transport.iceCandidates
+                .map((candidate) => {
+                  const ip = candidate?.ip || "n/a";
+                  const port = candidate?.port || "n/a";
+                  const protocol = candidate?.protocol || "n/a";
+                  const type = candidate?.type || "n/a";
+                  return `${protocol}:${ip}:${port}:${type}`;
+                })
+                .join(",")
+            : "none";
           // eslint-disable-next-line no-console
           console.log(
-            `[ws] transport_created session=${ws.sessionId} participant=${ws.participantId} direction=${direction} transportId=${transport.id}`
+            `[ws] transport_created session=${ws.sessionId} participant=${ws.participantId} direction=${direction} transportId=${transport.id} candidates=${candidateSummary}`
           );
           send(ws, "transportCreated", { direction, ...transport }, requestId);
           return;
