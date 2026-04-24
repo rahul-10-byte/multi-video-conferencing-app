@@ -401,7 +401,15 @@ async function connectAndJoin(joinToken) {
     state.producerIds.audio = producer.id;
   }
   if (videoTrack) {
-    const producer = await state.sendTransport.produce({ track: videoTrack });
+    const producer = await state.sendTransport.produce({
+      track: videoTrack,
+      // Default 3-layer simulcast profile for adaptive quality.
+      encodings: [
+        { rid: "q", scaleResolutionDownBy: 4, maxBitrate: 150_000 },
+        { rid: "h", scaleResolutionDownBy: 2, maxBitrate: 500_000 },
+        { rid: "f", scaleResolutionDownBy: 1, maxBitrate: 1_200_000 }
+      ]
+    });
     state.producerIds.video = producer.id;
   }
 
