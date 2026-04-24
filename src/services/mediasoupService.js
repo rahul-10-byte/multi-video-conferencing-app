@@ -246,6 +246,29 @@ class MediasoupService {
     return all;
   }
 
+  listSessionProducerRefs(sessionId) {
+    const room = this.getRoom(sessionId);
+    if (!room) return [];
+    const refs = [];
+    for (const [participantId, participant] of room.participants.entries()) {
+      for (const producer of participant.producers.values()) {
+        refs.push({ sessionId, participantId, producerId: producer.id, kind: producer.kind, producer });
+      }
+    }
+    return refs;
+  }
+
+  async createPlainTransport(sessionId) {
+    const room = this.getRoom(sessionId);
+    if (!room) throw new Error("session_not_found");
+    const transport = await room.router.createPlainTransport({
+      listenIp: { ip: this.config.listenIp, announcedIp: this.config.announcedAddress || undefined },
+      rtcpMux: true,
+      comedia: false
+    });
+    return transport;
+  }
+
   getRouterRtpCapabilities(sessionId) {
     const room = this.getRoom(sessionId);
     if (!room) return null;

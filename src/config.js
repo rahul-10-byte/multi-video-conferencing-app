@@ -50,6 +50,13 @@ const config = {
     announcedAddress: process.env.MEDIASOUP_ANNOUNCED_ADDRESS || undefined,
     maxIncomingBitrate: intFromEnv("MEDIASOUP_MAX_INCOMING_BITRATE", 1500000)
   },
+  recording: {
+    enabled: (process.env.VC_RECORDING_ENABLED || "true").toLowerCase() === "true",
+    ffmpegPath: process.env.VC_FFMPEG_PATH || "ffmpeg",
+    outputDir: process.env.VC_RECORDING_OUTPUT_DIR || "recordings",
+    hostIp: process.env.VC_RECORDING_HOST_IP || "127.0.0.1",
+    basePort: intFromEnv("VC_RECORDING_BASE_PORT", 50040)
+  },
   turn: {
     stunUrl: process.env.TURN_STUN_URL || "stun:localhost:3478",
     turnUrl: process.env.TURN_URL || "turn:localhost:3478?transport=udp",

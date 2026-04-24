@@ -6,6 +6,15 @@ const el = {
   backendUrl: document.getElementById("backendUrl"),
   participantId: document.getElementById("participantId"),
   role: document.getElementById("role"),
+  customerOtpPanel: document.getElementById("customerOtpPanel"),
+  roomActions: document.getElementById("roomActions"),
+  createRoomBox: document.getElementById("createRoomBox"),
+  joinRoomBox: document.getElementById("joinRoomBox"),
+  otpSessionId: document.getElementById("otpSessionId"),
+  otpCustomerId: document.getElementById("otpCustomerId"),
+  otpCode: document.getElementById("otpCode"),
+  verifyOtpBtn: document.getElementById("verifyOtpBtn"),
+  otpResult: document.getElementById("otpResult"),
   createRoomName: document.getElementById("createRoomName"),
   joinRoomInput: document.getElementById("joinRoomInput"),
   createRoomBtn: document.getElementById("createRoomBtn"),
@@ -14,6 +23,19 @@ const el = {
   leaveBtn: document.getElementById("leaveBtn"),
   audioBtn: document.getElementById("audioBtn"),
   videoBtn: document.getElementById("videoBtn"),
+  switchCameraBtn: document.getElementById("switchCameraBtn"),
+  startRecordingBtn: document.getElementById("startRecordingBtn"),
+  stopRecordingBtn: document.getElementById("stopRecordingBtn"),
+  inviteCustomerId: document.getElementById("inviteCustomerId"),
+  inviteChannel: document.getElementById("inviteChannel"),
+  sendInviteBtn: document.getElementById("sendInviteBtn"),
+  inviteResult: document.getElementById("inviteResult"),
+  dispositionOutcome: document.getElementById("dispositionOutcome"),
+  dispositionNotes: document.getElementById("dispositionNotes"),
+  submitDispositionBtn: document.getElementById("submitDispositionBtn"),
+  chatInput: document.getElementById("chatInput"),
+  chatSendBtn: document.getElementById("chatSendBtn"),
+  chatLog: document.getElementById("chatLog"),
   participantsGrid: document.getElementById("participantsGrid"),
   connectionState: document.getElementById("connectionState"),
   diagnostics: document.getElementById("diagnostics"),
@@ -40,14 +62,49 @@ const state = {
   reconnectAttempts: 0,
   intentionalLeave: false,
   joined: false,
+  recordingActive: false,
+  inviteJoinMode: false,
+  otpVerifiedKeys: new Set(),
   connectionMeta: null,
+  localVideoDeviceIds: [],
+  activeVideoDeviceIndex: 0,
   producersById: new Map(),
   consumersByProducerId: new Map(),
-  tilesByParticipantId: new Map()
+  tilesByParticipantId: new Map(),
+  audioProducer: null,
+  videoProducer: null
 };
 
 if (!el.backendUrl.value.trim()) {
   el.backendUrl.value = window.location.origin;
+}
+
+function updateRoleDrivenUi() {
+  const isCustomer = el.role.value === "customer";
+  el.customerOtpPanel.classList.toggle("hidden", !isCustomer);
+  if (!state.inviteJoinMode) {
+    el.roomActions.classList.remove("hidden");
+  }
+}
+
+function otpKey(sessionId, participantId) {
+  return `${sessionId}:${participantId}`;
+}
+
+function configureInviteModeFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const sessionId = params.get("sessionId");
+  const participantId = params.get("participantId");
+  if (!sessionId || !participantId) return;
+  state.inviteJoinMode = true;
+  el.role.value = "customer";
+  el.participantId.value = participantId;
+  el.joinRoomInput.value = sessionId;
+  el.otpSessionId.value = sessionId;
+  el.otpCustomerId.value = participantId;
+  el.roomActions.classList.add("hidden");
+  el.customerOtpPanel.classList.remove("hidden");
+  el.otpResult.textContent = "Enter OTP shared by agent, then verify to join call.";
 }
 
 function log(message, data) {
@@ -158,6 +215,11 @@ function handleWsMessage(raw) {
   }
   if (msg.event === "qualityAlert") {
     log("quality_alert", msg.data || {});
+  } else if (msg.event === "chatMessage") {
+    const line = `[${msg.data?.sentAt || new Date().toISOString()}] ${msg.data?.participantId || "unknown"}: ${msg.data?.text || ""}`;
+    el.chatLog.textContent = `${line}\n${el.chatLog.textContent}`.slice(0, 10000);
+  } else if (msg.event === "deviceChanged") {
+    log("device_changed", msg.data || {});
   } else if (msg.event === "error") {
     log("ws_error", msg.data || {});
   }
@@ -206,6 +268,17 @@ function cleanupTiles() {
   state.producersById.clear();
 }
 
+function removeParticipantTileIfUnused(participantId) {
+  const tile = state.tilesByParticipantId.get(participantId);
+  if (!tile) return;
+  const hasTracks = tile.stream.getTracks().length > 0;
+  const isLocal = state.connectionMeta && participantId === state.connectionMeta.participantId;
+  if (!hasTracks && !isLocal) {
+    tile.container.remove();
+    state.tilesByParticipantId.delete(participantId);
+  }
+}
+
 async function setupMedia() {
   if (state.localStream) return;
   try {
@@ -224,6 +297,22 @@ async function setupMedia() {
   const localId = state.connectionMeta?.participantId || "local";
   const tile = ensureParticipantTile(localId, true);
   tile.video.srcObject = state.localStream;
+  await refreshVideoDevices();
+}
+
+async function refreshVideoDevices() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    state.localVideoDeviceIds = devices.filter((d) => d.kind === "videoinput").map((d) => d.deviceId);
+    const currentTrack = state.localStream?.getVideoTracks?.()[0];
+    const currentSettings = currentTrack?.getSettings?.() || {};
+    const currentDeviceId = currentSettings.deviceId || null;
+    const idx = state.localVideoDeviceIds.findIndex((id) => id === currentDeviceId);
+    state.activeVideoDeviceIndex = idx >= 0 ? idx : 0;
+  } catch (_err) {
+    state.localVideoDeviceIds = [];
+    state.activeVideoDeviceIndex = 0;
+  }
 }
 
 function renderDiagnostics(snapshot) {
@@ -304,6 +393,7 @@ async function consumeMissingProducers() {
   if (!state.joined || !state.recvTransport) return;
   const updateResp = await wsRequest("listProducers", {});
   const producers = updateResp?.data?.producers || [];
+  const currentProducerIds = new Set(producers.map((p) => p.producerId));
 
   for (const p of producers) {
     state.producersById.set(p.producerId, p);
@@ -320,11 +410,34 @@ async function consumeMissingProducers() {
       kind: consumed.kind,
       rtpParameters: consumed.rtpParameters
     });
-    state.consumersByProducerId.set(consumed.producerId, consumer);
     const participantId = p.participantId || "participant";
+    state.consumersByProducerId.set(consumed.producerId, { consumer, participantId });
     const tile = ensureParticipantTile(participantId, false);
     tile.stream.addTrack(consumer.track);
     tile.video.srcObject = tile.stream;
+  }
+
+  for (const [producerId, value] of state.consumersByProducerId.entries()) {
+    if (currentProducerIds.has(producerId)) continue;
+    const consumer = value.consumer;
+    const participantId = value.participantId;
+    const tile = state.tilesByParticipantId.get(participantId);
+    if (tile) {
+      const tracks = tile.stream.getTracks();
+      for (const track of tracks) {
+        if (track.id === consumer.track.id) {
+          tile.stream.removeTrack(track);
+          break;
+        }
+      }
+      tile.video.srcObject = tile.stream;
+      removeParticipantTileIfUnused(participantId);
+    }
+    try {
+      consumer.close();
+    } catch (_err) {}
+    state.consumersByProducerId.delete(producerId);
+    state.producersById.delete(producerId);
   }
 }
 
@@ -398,6 +511,7 @@ async function connectAndJoin(joinToken) {
   const videoTrack = state.localStream.getVideoTracks()[0];
   if (audioTrack) {
     const producer = await state.sendTransport.produce({ track: audioTrack });
+    state.audioProducer = producer;
     state.producerIds.audio = producer.id;
   }
   if (videoTrack) {
@@ -410,6 +524,7 @@ async function connectAndJoin(joinToken) {
         { rid: "f", scaleResolutionDownBy: 1, maxBitrate: 1_200_000 }
       ]
     });
+    state.videoProducer = producer;
     state.producerIds.video = producer.id;
   }
 
@@ -423,19 +538,41 @@ async function connectAndJoin(joinToken) {
   el.leaveBtn.disabled = false;
   el.audioBtn.disabled = false;
   el.videoBtn.disabled = false;
+  el.switchCameraBtn.disabled = false;
+  el.startRecordingBtn.disabled = false;
+  el.stopRecordingBtn.disabled = true;
+  el.sendInviteBtn.disabled = false;
+  el.submitDispositionBtn.disabled = false;
+  el.chatSendBtn.disabled = false;
 }
 
 async function joinBySessionId(sessionId, roomLabel) {
   const baseUrl = el.backendUrl.value.trim();
   const rawParticipantId = el.participantId.value.trim() || "user";
-  const participantId = await ensureUniqueParticipantId(baseUrl, sessionId, rawParticipantId);
-  el.participantId.value = participantId;
   const role = el.role.value;
+  let participantId = await ensureUniqueParticipantId(baseUrl, sessionId, rawParticipantId);
   state.connectionMeta = { baseUrl, sessionId, participantId, role, roomLabel };
   state.intentionalLeave = false;
   clearReconnectTimer();
   cleanupTiles();
   await setupMedia();
+  if (role === "customer") {
+    const otp = el.otpCode.value.trim();
+    const otpSessionId = el.otpSessionId.value.trim();
+    const otpCustomerId = el.otpCustomerId.value.trim() || participantId;
+    if (!otp) throw new Error("OTP is required for customer");
+    if (!otpSessionId || otpSessionId !== sessionId) {
+      throw new Error("OTP Session ID must match selected session");
+    }
+    const key = otpKey(sessionId, otpCustomerId);
+    if (!state.otpVerifiedKeys.has(key)) {
+      await postJson(`${baseUrl}/v1/sessions/${sessionId}/customer-verify-otp`, { participantId: otpCustomerId, otp });
+      state.otpVerifiedKeys.add(key);
+    }
+    participantId = otpCustomerId;
+  }
+  el.participantId.value = participantId;
+  state.connectionMeta = { baseUrl, sessionId, participantId, role, roomLabel };
   const joinToken = await postJson(`${baseUrl}/v1/sessions/${sessionId}/join-token`, { participantId, role });
   await connectAndJoin(joinToken);
 }
@@ -483,9 +620,11 @@ async function cleanupConnectionOnly() {
   clearPendingRequests();
   state.device = null;
   state.producerIds = { audio: null, video: null };
+  state.audioProducer = null;
+  state.videoProducer = null;
   for (const consumer of state.consumersByProducerId.values()) {
     try {
-      consumer.close();
+      consumer.consumer.close();
     } catch (_err) {}
   }
   state.consumersByProducerId.clear();
@@ -546,6 +685,12 @@ async function leave(fromReconnectFailure = false) {
   el.leaveBtn.disabled = true;
   el.audioBtn.disabled = true;
   el.videoBtn.disabled = true;
+  el.switchCameraBtn.disabled = true;
+  el.startRecordingBtn.disabled = true;
+  el.stopRecordingBtn.disabled = true;
+  el.sendInviteBtn.disabled = true;
+  el.submitDispositionBtn.disabled = true;
+  el.chatSendBtn.disabled = true;
   setConnectionState(fromReconnectFailure ? "failed" : "disconnected", fromReconnectFailure ? "Reconnect Failed" : "Disconnected");
   showLandingScreen();
 }
@@ -562,6 +707,100 @@ function toggleVideo() {
   if (!track) return;
   track.enabled = !track.enabled;
   el.videoBtn.textContent = track.enabled ? "Stop Video" : "Start Video";
+}
+
+async function switchCamera() {
+  if (!state.videoProducer || state.localVideoDeviceIds.length < 2) {
+    log("camera_switch_unavailable", { reason: "less_than_two_cameras_or_no_video_producer" });
+    return;
+  }
+  state.activeVideoDeviceIndex = (state.activeVideoDeviceIndex + 1) % state.localVideoDeviceIds.length;
+  const nextDeviceId = state.localVideoDeviceIds[state.activeVideoDeviceIndex];
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { deviceId: { exact: nextDeviceId } },
+    audio: false
+  });
+  const newTrack = stream.getVideoTracks()[0];
+  const oldTrack = state.localStream.getVideoTracks()[0];
+  if (oldTrack) {
+    state.localStream.removeTrack(oldTrack);
+    oldTrack.stop();
+  }
+  state.localStream.addTrack(newTrack);
+  await state.videoProducer.replaceTrack({ track: newTrack });
+  const localId = state.connectionMeta?.participantId || "local";
+  const tile = ensureParticipantTile(localId, true);
+  tile.video.srcObject = state.localStream;
+  await wsRequest("deviceChanged", { device: "camera_switched" }, 3000).catch(() => {});
+}
+
+async function sendInvite() {
+  const baseUrl = el.backendUrl.value.trim();
+  const sessionId = state.connectionMeta?.sessionId;
+  if (!sessionId) throw new Error("No active session");
+  const participantId = el.inviteCustomerId.value.trim();
+  if (!participantId) throw new Error("Customer ID required");
+  const channel = el.inviteChannel.value.trim() || "link";
+  const resp = await postJson(`${baseUrl}/v1/sessions/${sessionId}/customer-invite`, { participantId, channel });
+  el.inviteResult.textContent = JSON.stringify(resp, null, 2);
+  el.otpSessionId.value = sessionId;
+  el.otpCustomerId.value = participantId;
+  el.otpCode.value = resp?.otp?.code || "";
+  el.otpResult.textContent = "OTP info prefilled from latest invite. Share OTP with customer for test mode.";
+}
+
+async function startRecording() {
+  const { baseUrl, sessionId, participantId } = state.connectionMeta || {};
+  if (!sessionId) throw new Error("No active session");
+  await postJson(`${baseUrl}/v1/sessions/${sessionId}/recording/start`, { initiatedBy: participantId || "agent" });
+  state.recordingActive = true;
+  el.startRecordingBtn.disabled = true;
+  el.stopRecordingBtn.disabled = false;
+}
+
+async function stopRecording() {
+  const { baseUrl, sessionId, participantId } = state.connectionMeta || {};
+  if (!sessionId) throw new Error("No active session");
+  await postJson(`${baseUrl}/v1/sessions/${sessionId}/recording/stop`, { stoppedBy: participantId || "agent" });
+  state.recordingActive = false;
+  el.startRecordingBtn.disabled = false;
+  el.stopRecordingBtn.disabled = true;
+}
+
+async function submitDisposition() {
+  const { baseUrl, sessionId, participantId } = state.connectionMeta || {};
+  if (!sessionId) throw new Error("No active session");
+  const outcome = el.dispositionOutcome.value;
+  const notes = el.dispositionNotes.value.trim();
+  await postJson(`${baseUrl}/v1/sessions/${sessionId}/disposition`, {
+    outcome,
+    notes,
+    resolvedBy: participantId || "agent"
+  });
+  log("disposition_submitted", { outcome });
+}
+
+async function sendChat() {
+  const text = el.chatInput.value.trim();
+  if (!text) return;
+  await wsRequest("chatSend", { text });
+  el.chatInput.value = "";
+}
+
+async function verifyOtpFromUi() {
+  const baseUrl = el.backendUrl.value.trim();
+  const sessionId = el.otpSessionId.value.trim();
+  const participantId = el.otpCustomerId.value.trim();
+  const otp = el.otpCode.value.trim();
+  if (!sessionId || !participantId || !otp) {
+    throw new Error("sessionId, customerId and OTP are required");
+  }
+  const resp = await postJson(`${baseUrl}/v1/sessions/${sessionId}/customer-verify-otp`, { participantId, otp });
+  state.otpVerifiedKeys.add(otpKey(sessionId, participantId));
+  el.otpResult.textContent = JSON.stringify(resp, null, 2);
+  if (state.inviteJoinMode) {
+    await joinBySessionId(sessionId, sessionId);
+  }
 }
 
 el.createRoomBtn.addEventListener("click", () => {
@@ -586,6 +825,35 @@ el.leaveBtn.addEventListener("click", () => {
 
 el.audioBtn.addEventListener("click", toggleAudio);
 el.videoBtn.addEventListener("click", toggleVideo);
+el.switchCameraBtn.addEventListener("click", () => {
+  switchCamera().catch((error) => log("switch_camera_failed", { message: error.message }));
+});
+el.sendInviteBtn.addEventListener("click", () => {
+  sendInvite().catch((error) => log("send_invite_failed", { message: error.message }));
+});
+el.startRecordingBtn.addEventListener("click", () => {
+  startRecording().catch((error) => log("recording_start_failed", { message: error.message }));
+});
+el.stopRecordingBtn.addEventListener("click", () => {
+  stopRecording().catch((error) => log("recording_stop_failed", { message: error.message }));
+});
+el.submitDispositionBtn.addEventListener("click", () => {
+  submitDisposition().catch((error) => log("disposition_failed", { message: error.message }));
+});
+el.chatSendBtn.addEventListener("click", () => {
+  sendChat().catch((error) => log("chat_send_failed", { message: error.message }));
+});
+el.chatInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    sendChat().catch((error) => log("chat_send_failed", { message: error.message }));
+  }
+});
+el.verifyOtpBtn.addEventListener("click", () => {
+  verifyOtpFromUi().catch((error) => {
+    el.otpResult.textContent = `OTP verification failed: ${error.message}`;
+  });
+});
+el.role.addEventListener("change", updateRoleDrivenUi);
 
 getJson(`${el.backendUrl.value.trim()}/healthz`)
   .then(() => log("backend reachable"))
@@ -593,3 +861,5 @@ getJson(`${el.backendUrl.value.trim()}/healthz`)
 
 setConnectionState("disconnected", "Disconnected");
 showLandingScreen();
+configureInviteModeFromUrl();
+updateRoleDrivenUi();

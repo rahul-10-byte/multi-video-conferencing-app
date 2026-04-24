@@ -62,7 +62,7 @@ const otpService = new OtpService({
   maxAttempts: config.otpMaxAttempts,
   fixedCode: config.testOtpCode
 });
-const recordingService = new RecordingService();
+const recordingService = new RecordingService(config.recording);
 const nodeId = `node_${uuidv7().replaceAll("-", "")}`;
 let reconnectWorkerRunning = false;
 
@@ -312,9 +312,9 @@ app.post("/v1/sessions/:sessionId/recording/start", requireApiKey, async (req, r
     res.status(404).json({ error: "session_not_found" });
     return;
   }
-  const result = recordingService.start(sessionId, initiatedBy);
+  const result = await recordingService.start(sessionId, initiatedBy, mediasoupService);
   if (!result.ok) {
-    res.status(409).json({ error: result.reason });
+    res.status(409).json({ error: result.reason, detail: result.detail || null });
     return;
   }
   await readModel?.saveRecording(result.recording);
@@ -334,7 +334,7 @@ app.post("/v1/sessions/:sessionId/recording/stop", requireApiKey, async (req, re
     res.status(404).json({ error: "session_not_found" });
     return;
   }
-  const result = recordingService.stop(sessionId, stoppedBy);
+  const result = await recordingService.stop(sessionId, stoppedBy);
   if (!result.ok) {
     res.status(409).json({ error: result.reason });
     return;

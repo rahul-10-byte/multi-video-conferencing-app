@@ -28,11 +28,37 @@ label {
   margin-bottom: 8px;
 }
 
+label input,
+label select {
+  display: block;
+  width: 100%;
+  margin: 6px 0 0;
+  box-sizing: border-box;
+}
+
 input,
 select,
 button {
-  margin-left: 8px;
   padding: 6px;
+  border-radius: 6px;
+  border: 1px solid #475569;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
 }
 
 .room-actions {
@@ -52,6 +78,13 @@ button {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 10px;
+}
+
+.controls-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .participants-grid {
@@ -94,6 +127,25 @@ video {
   background: #020617;
   padding: 8px;
   border-radius: 6px;
+}
+
+#inviteResult,
+#chatLog,
+#otpResult {
+  min-height: 90px;
+  background: #020617;
+  padding: 8px;
+  border-radius: 6px;
+}
+
+.chat-composer {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.chat-composer input {
+  flex: 1;
 }
 
 .conn-state {

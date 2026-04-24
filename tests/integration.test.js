@@ -265,18 +265,23 @@ test("supports recording start/stop and session disposition endpoints", async (t
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ initiatedBy: "agent-1" })
   });
-  assert.equal(startRes.status, 200);
-  const started = await startRes.json();
-  assert.equal(started.recording.state, "recording");
+  assert.ok([200, 409].includes(startRes.status));
+  if (startRes.status === 200) {
+    const started = await startRes.json();
+    assert.equal(started.recording.state, "recording");
 
-  const stopRes = await fetch(`${baseUrl}/v1/sessions/${sessionId}/recording/stop`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ stoppedBy: "agent-1" })
-  });
-  assert.equal(stopRes.status, 200);
-  const stopped = await stopRes.json();
-  assert.equal(stopped.recording.state, "stopped");
+    const stopRes = await fetch(`${baseUrl}/v1/sessions/${sessionId}/recording/stop`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ stoppedBy: "agent-1" })
+    });
+    assert.equal(stopRes.status, 200);
+    const stopped = await stopRes.json();
+    assert.equal(stopped.recording.state, "stopped");
+  } else {
+    const startPayload = await startRes.json();
+    assert.equal(startPayload.error, "no_media_producers");
+  }
 
   const dispositionRes = await fetch(`${baseUrl}/v1/sessions/${sessionId}/disposition`, {
     method: "POST",
