@@ -52,6 +52,18 @@ Contract-first backend scaffold for Multi Video Conferencing App aligned to `MED
 - TURN REST short-lived credential issuance.
 - Production OTP/SMS/email provider integration (current OTP is in-memory test mode).
 
+## Recording (FFmpeg pipeline)
+
+- Recording APIs now spawn an FFmpeg process and store a `.webm` file per session.
+- Output path is saved in `recording.storageUri` and persisted in `vc_recordings`.
+- Required on server: FFmpeg installed and available in PATH (or set `VC_FFMPEG_PATH`).
+- Config:
+  - `VC_RECORDING_ENABLED=true`
+  - `VC_FFMPEG_PATH=ffmpeg`
+  - `VC_RECORDING_OUTPUT_DIR=recordings`
+  - `VC_RECORDING_HOST_IP=127.0.0.1`
+  - `VC_RECORDING_BASE_PORT=50040`
+
 ## Run
 
 1. Copy `.env.example` to `.env` and update values.

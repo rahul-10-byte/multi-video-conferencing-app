@@ -18,9 +18,9 @@ class RecordingService {
       return { ok: false, reason: "recording_disabled" };
     }
     const producerRefs = mediasoupService.listSessionProducerRefs(sessionId);
-    const audioRef = producerRefs.find((p) => p.kind === "audio");
-    const videoRef = producerRefs.find((p) => p.kind === "video");
-    if (!audioRef && !videoRef) {
+    const audioRefs = producerRefs.filter((p) => p.kind === "audio");
+    const videoRefs = producerRefs.filter((p) => p.kind === "video");
+    if (audioRefs.length === 0 && videoRefs.length === 0) {
       return { ok: false, reason: "no_media_producers" };
     }
 
@@ -47,28 +47,39 @@ class RecordingService {
         rtpCapabilities: room.router.rtpCapabilities,
         paused: false
       });
-      taps.push({ kind: ref.kind, transport, consumer, rtpPort });
+      taps.push({
+        kind: ref.kind,
+        participantId: ref.participantId,
+        producerId: ref.producerId,
+        transport,
+        consumer,
+        rtpPort
+      });
     };
 
     try {
-      await addTap(audioRef);
-      await addTap(videoRef);
+      for (const ref of audioRefs) {
+        await addTap(ref);
+      }
+      for (const ref of videoRefs) {
+        await addTap(ref);
+      }
       const sdp = this.buildSdp(taps);
       await fsp.writeFile(sdpFile, sdp, "utf8");
-      const ffmpeg = spawn(this.config.ffmpegPath || "ffmpeg", [
-        "-protocol_whitelist", "file,udp,rtp",
-        "-f", "sdp",
-        "-i", sdpFile,
-        "-map", "0:v?",
-        "-map", "0:a?",
-        "-c:v", "copy",
-        "-c:a", "copy",
-        "-f", "webm",
-        outputFile
-      ], { stdio: ["ignore", "pipe", "pipe"] });
+      const ffmpegArgs = this.buildFfmpegArgs(taps, sdpFile, outputFile);
+      const ffmpeg = spawn(this.config.ffmpegPath || "ffmpeg", ffmpegArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
       ffmpeg.stdout.on("data", () => {});
-      ffmpeg.stderr.on("data", () => {});
+      let stderrTail = "";
+      ffmpeg.stderr.on("data", (chunk) => {
+        stderrTail = `${stderrTail}${chunk.toString()}`.slice(-4000);
+      });
+      ffmpeg.on("exit", (code) => {
+        if (code !== 0 && code !== null) {
+          // eslint-disable-next-line no-console
+          console.error(`recording_ffmpeg_exit_nonzero session=${sessionId} code=${code} detail=${stderrTail}`);
+        }
+      });
 
       const recording = {
         recordingId,
@@ -80,9 +91,14 @@ class RecordingService {
         durationMs: null,
         sizeBytes: null,
         initiatedBy,
+        ffmpegStderrTail: "",
+        tapCount: taps.length,
+        audioTapCount: taps.filter((t) => t.kind === "audio").length,
+        videoTapCount: taps.filter((t) => t.kind === "video").length,
         _ffmpeg: ffmpeg,
         _sdpFile: sdpFile,
-        _taps: taps
+        _taps: taps,
+        _getStderrTail: () => stderrTail
       };
       this.activeBySession.set(sessionId, recording);
       return { ok: true, recording: this.toPublic(recording) };
@@ -135,7 +151,8 @@ class RecordingService {
       stoppedAt,
       durationMs,
       stoppedBy,
-      sizeBytes
+      sizeBytes,
+      ffmpegStderrTail: typeof active._getStderrTail === "function" ? active._getStderrTail() : ""
     };
     delete finished._ffmpeg;
     delete finished._sdpFile;
@@ -157,15 +174,80 @@ class RecordingService {
       "t=0 0"
     ];
     for (const tap of taps) {
-      if (tap.kind === "audio") {
-        lines.push(`m=audio ${tap.rtpPort} RTP/AVP 111`);
-        lines.push("a=rtpmap:111 opus/48000/2");
-      } else {
-        lines.push(`m=video ${tap.rtpPort} RTP/AVP 96`);
-        lines.push("a=rtpmap:96 VP8/90000");
+      const codec = tap.consumer?.rtpParameters?.codecs?.[0];
+      if (!codec) continue;
+      const payloadType = codec.payloadType;
+      const mimeType = String(codec.mimeType || "").toLowerCase();
+      const codecName = mimeType.split("/")[1] || (tap.kind === "audio" ? "opus" : "VP8");
+      const channels = codec.channels ? `/${codec.channels}` : "";
+      const encoding = tap.consumer?.rtpParameters?.encodings?.[0];
+      lines.push(`m=${tap.kind} ${tap.rtpPort} RTP/AVP ${payloadType}`);
+      lines.push("a=recvonly");
+      lines.push(`a=rtpmap:${payloadType} ${codecName}/${codec.clockRate}${channels}`);
+      if (codec.parameters && Object.keys(codec.parameters).length > 0) {
+        const fmtp = Object.entries(codec.parameters)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(";");
+        lines.push(`a=fmtp:${payloadType} ${fmtp}`);
+      }
+      if (encoding?.ssrc) {
+        lines.push(`a=ssrc:${encoding.ssrc} cname:vc-recording`);
       }
     }
     return `${lines.join("\n")}\n`;
+  }
+
+  buildFfmpegArgs(taps, sdpFile, outputFile) {
+    const args = [
+      "-loglevel", "warning",
+      "-protocol_whitelist", "file,udp,rtp",
+      "-fflags", "+genpts",
+      "-f", "sdp",
+      "-i", sdpFile
+    ];
+    const videoCount = taps.filter((t) => t.kind === "video").length;
+    const audioCount = taps.filter((t) => t.kind === "audio").length;
+    const filters = [];
+
+    if (videoCount > 0) {
+      if (videoCount === 1) {
+        filters.push("[0:v:0]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
+      } else if (videoCount === 2) {
+        filters.push("[0:v:0]scale=640:720[v0]");
+        filters.push("[0:v:1]scale=640:720[v1]");
+        filters.push("[v0][v1]hstack=inputs=2[vout]");
+      } else {
+        const capped = Math.min(videoCount, 4);
+        for (let i = 0; i < capped; i += 1) {
+          filters.push(`[0:v:${i}]scale=640:360[v${i}]`);
+        }
+        const joined = Array.from({ length: capped }, (_v, i) => `[v${i}]`).join("");
+        const layout = capped === 3 ? "0_0|640_0|0_360" : "0_0|640_0|0_360|640_360";
+        filters.push(`${joined}xstack=inputs=${capped}:layout=${layout}[vout]`);
+      }
+    }
+
+    if (audioCount > 0) {
+      if (audioCount === 1) {
+        filters.push("[0:a:0]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]");
+      } else {
+        const capped = Math.min(audioCount, 6);
+        const inputs = Array.from({ length: capped }, (_v, i) => `[0:a:${i}]`).join("");
+        filters.push(`${inputs}amix=inputs=${capped}:duration=longest:dropout_transition=2[aout]`);
+      }
+    }
+
+    if (filters.length > 0) {
+      args.push("-filter_complex", filters.join(";"));
+    }
+    if (videoCount > 0) {
+      args.push("-map", "[vout]", "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "4");
+    }
+    if (audioCount > 0) {
+      args.push("-map", "[aout]", "-c:a", "libopus");
+    }
+    args.push("-shortest", "-f", "webm", outputFile);
+    return args;
   }
 
   toPublic(recording) {
@@ -179,7 +261,11 @@ class RecordingService {
       durationMs: recording.durationMs,
       sizeBytes: recording.sizeBytes,
       initiatedBy: recording.initiatedBy,
-      stoppedBy: recording.stoppedBy
+      stoppedBy: recording.stoppedBy,
+      ffmpegStderrTail: recording.ffmpegStderrTail || "",
+      tapCount: recording.tapCount || 0,
+      audioTapCount: recording.audioTapCount || 0,
+      videoTapCount: recording.videoTapCount || 0
     };
   }
 

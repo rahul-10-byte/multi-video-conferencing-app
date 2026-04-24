@@ -30,9 +30,11 @@ const el = {
   inviteChannel: document.getElementById("inviteChannel"),
   sendInviteBtn: document.getElementById("sendInviteBtn"),
   inviteResult: document.getElementById("inviteResult"),
+  invitePanel: document.getElementById("invitePanel"),
   dispositionOutcome: document.getElementById("dispositionOutcome"),
   dispositionNotes: document.getElementById("dispositionNotes"),
   submitDispositionBtn: document.getElementById("submitDispositionBtn"),
+  dispositionPanel: document.getElementById("dispositionPanel"),
   chatInput: document.getElementById("chatInput"),
   chatSendBtn: document.getElementById("chatSendBtn"),
   chatLog: document.getElementById("chatLog"),
@@ -85,6 +87,24 @@ function updateRoleDrivenUi() {
   if (!state.inviteJoinMode) {
     el.roomActions.classList.remove("hidden");
   }
+}
+
+function updateInCallRoleUi() {
+  const role = state.connectionMeta?.role || el.role.value;
+  const isCustomer = role === "customer";
+  // Customer should always have core call controls.
+  el.audioBtn.disabled = false;
+  el.videoBtn.disabled = false;
+  el.switchCameraBtn.disabled = false;
+  el.leaveBtn.disabled = false;
+
+  // Agent-only controls.
+  el.invitePanel.classList.toggle("hidden", isCustomer);
+  el.dispositionPanel.classList.toggle("hidden", isCustomer);
+  el.startRecordingBtn.disabled = isCustomer;
+  el.stopRecordingBtn.disabled = isCustomer || !state.recordingActive;
+  el.sendInviteBtn.disabled = isCustomer;
+  el.submitDispositionBtn.disabled = isCustomer;
 }
 
 function otpKey(sessionId, participantId) {
@@ -497,6 +517,10 @@ async function connectAndJoin(joinToken) {
   });
   const joinedResp = await wsRequest("join", { token: joinToken.token });
   const joined = joinedResp.data;
+  state.connectionMeta = {
+    ...(state.connectionMeta || {}),
+    role: joined.role
+  };
   showCallScreen();
   el.activeRoomLabel.textContent = state.connectionMeta.roomLabel;
   state.device = new Device();
@@ -544,6 +568,7 @@ async function connectAndJoin(joinToken) {
   el.sendInviteBtn.disabled = false;
   el.submitDispositionBtn.disabled = false;
   el.chatSendBtn.disabled = false;
+  updateInCallRoleUi();
 }
 
 async function joinBySessionId(sessionId, roomLabel) {
@@ -691,6 +716,8 @@ async function leave(fromReconnectFailure = false) {
   el.sendInviteBtn.disabled = true;
   el.submitDispositionBtn.disabled = true;
   el.chatSendBtn.disabled = true;
+  el.invitePanel.classList.remove("hidden");
+  el.dispositionPanel.classList.remove("hidden");
   setConnectionState(fromReconnectFailure ? "failed" : "disconnected", fromReconnectFailure ? "Reconnect Failed" : "Disconnected");
   showLandingScreen();
 }

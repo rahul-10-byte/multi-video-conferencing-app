@@ -312,6 +312,14 @@ app.post("/v1/sessions/:sessionId/recording/start", requireApiKey, async (req, r
     res.status(404).json({ error: "session_not_found" });
     return;
   }
+  const sessionParticipants = sessionStore.listParticipants(sessionId) || [];
+  if (sessionParticipants.length > 0) {
+    const actor = sessionParticipants.find((p) => p.participantId === initiatedBy);
+    if (!actor || actor.role !== "agent") {
+      res.status(403).json({ error: "agent_role_required_for_recording" });
+      return;
+    }
+  }
   const result = await recordingService.start(sessionId, initiatedBy, mediasoupService);
   if (!result.ok) {
     res.status(409).json({ error: result.reason, detail: result.detail || null });
@@ -333,6 +341,14 @@ app.post("/v1/sessions/:sessionId/recording/stop", requireApiKey, async (req, re
   if (!session) {
     res.status(404).json({ error: "session_not_found" });
     return;
+  }
+  const sessionParticipants = sessionStore.listParticipants(sessionId) || [];
+  if (sessionParticipants.length > 0) {
+    const actor = sessionParticipants.find((p) => p.participantId === stoppedBy);
+    if (!actor || actor.role !== "agent") {
+      res.status(403).json({ error: "agent_role_required_for_recording" });
+      return;
+    }
   }
   const result = await recordingService.stop(sessionId, stoppedBy);
   if (!result.ok) {
