@@ -62,6 +62,16 @@ function validateEventPayload(event, data) {
       return { ok: false, code: "invalid_payload", detail: "qualityReport requires object payload" };
     }
   }
+  if (event === "chatSend") {
+    if (typeof data.text !== "string" || !data.text.trim()) {
+      return { ok: false, code: "invalid_payload", detail: "chatSend.text is required" };
+    }
+  }
+  if (event === "deviceChanged") {
+    if (typeof data.device !== "string" || !data.device.trim()) {
+      return { ok: false, code: "invalid_payload", detail: "deviceChanged.device is required" };
+    }
+  }
   return { ok: true };
 }
 
@@ -75,6 +85,29 @@ function setupWebSocketServer({
   config
 }) {
   const wss = new WebSocketServer({ noServer: true });
+  const sessionSockets = new Map();
+
+  function addSocketToSession(sessionId, ws) {
+    if (!sessionSockets.has(sessionId)) sessionSockets.set(sessionId, new Set());
+    sessionSockets.get(sessionId).add(ws);
+  }
+
+  function removeSocketFromSession(sessionId, ws) {
+    const sockets = sessionSockets.get(sessionId);
+    if (!sockets) return;
+    sockets.delete(ws);
+    if (sockets.size === 0) sessionSockets.delete(sessionId);
+  }
+
+  function broadcastToSession(sessionId, event, data) {
+    const sockets = sessionSockets.get(sessionId);
+    if (!sockets) return;
+    for (const socket of sockets) {
+      if (socket.readyState === 1) {
+        send(socket, event, data);
+      }
+    }
+  }
 
   server.on("upgrade", (request, socket, head) => {
     if (!request.url || !request.url.startsWith("/v1/ws")) {
@@ -149,6 +182,7 @@ function setupWebSocketServer({
           ws.participantId = claims.sub;
           ws.role = claims.role;
           ws.rtpCapabilities = rtpCapabilities;
+          addSocketToSession(claims.sid, ws);
           await eventBus.emit(wasReconnecting ? "participant_reconnected" : "participant_joined", {
             sessionId: claims.sid,
             participantId: claims.sub,
@@ -285,6 +319,7 @@ function setupWebSocketServer({
 
         if (msg.event === "leave") {
           if (ws.sessionId && ws.participantId) {
+            removeSocketFromSession(ws.sessionId, ws);
             await reconnectStore.clearReconnecting(ws.sessionId, ws.participantId);
             mediasoupService.closeParticipant(ws.sessionId, ws.participantId);
             sessionStore.removeParticipant(ws.sessionId, ws.participantId);
@@ -296,6 +331,43 @@ function setupWebSocketServer({
             });
           }
           send(ws, "left", {}, requestId);
+          return;
+        }
+
+        if (msg.event === "chatSend") {
+          if (!ws.sessionId || !ws.participantId) {
+            send(ws, "error", { code: "unauthorized" }, requestId);
+            return;
+          }
+          const payload = {
+            messageId: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+            sessionId: ws.sessionId,
+            participantId: ws.participantId,
+            role: ws.role,
+            text: String(msg.data.text).trim(),
+            sentAt: new Date().toISOString()
+          };
+          broadcastToSession(ws.sessionId, "chatMessage", payload);
+          await eventBus.emit("chat_message_sent", payload);
+          send(ws, "ack", { event: "chatSend", messageId: payload.messageId }, requestId);
+          return;
+        }
+
+        if (msg.event === "deviceChanged") {
+          if (!ws.sessionId || !ws.participantId) {
+            send(ws, "error", { code: "unauthorized" }, requestId);
+            return;
+          }
+          const payload = {
+            sessionId: ws.sessionId,
+            participantId: ws.participantId,
+            role: ws.role,
+            device: String(msg.data.device).trim(),
+            changedAt: new Date().toISOString()
+          };
+          broadcastToSession(ws.sessionId, "deviceChanged", payload);
+          await eventBus.emit("participant_device_changed", payload);
+          send(ws, "ack", { event: "deviceChanged" }, requestId);
           return;
         }
 
@@ -358,6 +430,7 @@ function setupWebSocketServer({
       // eslint-disable-next-line no-console
       console.log(`[ws] client_closed session=${ws.sessionId || "n/a"} participant=${ws.participantId || "n/a"}`);
       if (ws.sessionId && ws.participantId) {
+        removeSocketFromSession(ws.sessionId, ws);
         sessionStore.setParticipantState(ws.sessionId, ws.participantId, "reconnecting");
         reconnectAttemptsTotal.inc();
         try {

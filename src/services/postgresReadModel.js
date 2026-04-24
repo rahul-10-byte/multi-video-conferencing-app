@@ -21,6 +21,58 @@ class PostgresReadModel {
   async migrate() {
     if (!this.pool) return;
     await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS vc_sessions (
+        session_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        external_ref TEXT,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        invite_links JSONB NOT NULL DEFAULT '[]'::jsonb,
+        invite_sent_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        started_at TIMESTAMPTZ,
+        ended_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_vc_sessions_status_created_at
+      ON vc_sessions (status, created_at DESC);
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS vc_recordings (
+        recording_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        storage_uri TEXT,
+        started_at TIMESTAMPTZ NOT NULL,
+        stopped_at TIMESTAMPTZ,
+        duration_ms BIGINT,
+        size_bytes BIGINT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_vc_recordings_session_started_at
+      ON vc_recordings (session_id, started_at DESC);
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS vc_dispositions (
+        session_id TEXT PRIMARY KEY,
+        outcome TEXT NOT NULL,
+        notes TEXT,
+        resolved_by TEXT,
+        resolved_at TIMESTAMPTZ NOT NULL
+      );
+    `);
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_vc_dispositions_resolved_at_outcome
+      ON vc_dispositions (resolved_at DESC, outcome);
+    `);
+
+    await this.pool.query(`
       CREATE TABLE IF NOT EXISTS vc_session_events (
         id BIGSERIAL PRIMARY KEY,
         event_id TEXT UNIQUE NOT NULL,
@@ -62,6 +114,101 @@ class PostgresReadModel {
         role,
         envelope.occurredAt,
         JSON.stringify(envelope)
+      ]
+    );
+  }
+
+  async upsertSession(session) {
+    if (!this.pool) return;
+    await this.pool.query(
+      `
+      INSERT INTO vc_sessions
+      (session_id, status, external_ref, metadata, invite_links, invite_sent_at, created_at, started_at, ended_at, updated_at)
+      VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, NOW())
+      ON CONFLICT (session_id) DO UPDATE SET
+        status = EXCLUDED.status,
+        external_ref = EXCLUDED.external_ref,
+        metadata = EXCLUDED.metadata,
+        invite_links = EXCLUDED.invite_links,
+        invite_sent_at = EXCLUDED.invite_sent_at,
+        started_at = EXCLUDED.started_at,
+        ended_at = EXCLUDED.ended_at,
+        updated_at = NOW()
+      `,
+      [
+        session.sessionId,
+        session.status,
+        session.externalRef || null,
+        JSON.stringify(session.metadata || {}),
+        JSON.stringify(session.inviteLinks || []),
+        session.inviteSentAt || null,
+        session.createdAt,
+        session.startedAt || null,
+        session.endedAt || null
+      ]
+    );
+  }
+
+  async appendInviteLink(sessionId, inviteLink, inviteSentAt) {
+    if (!this.pool) return;
+    await this.pool.query(
+      `
+      UPDATE vc_sessions
+      SET invite_links = COALESCE(invite_links, '[]'::jsonb) || to_jsonb($2::text),
+          invite_sent_at = $3,
+          updated_at = NOW()
+      WHERE session_id = $1
+      `,
+      [sessionId, inviteLink, inviteSentAt]
+    );
+  }
+
+  async saveRecording(recording) {
+    if (!this.pool) return;
+    await this.pool.query(
+      `
+      INSERT INTO vc_recordings
+      (recording_id, session_id, state, storage_uri, started_at, stopped_at, duration_ms, size_bytes, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+      ON CONFLICT (recording_id) DO UPDATE SET
+        state = EXCLUDED.state,
+        storage_uri = EXCLUDED.storage_uri,
+        stopped_at = EXCLUDED.stopped_at,
+        duration_ms = EXCLUDED.duration_ms,
+        size_bytes = EXCLUDED.size_bytes,
+        updated_at = NOW()
+      `,
+      [
+        recording.recordingId,
+        recording.sessionId,
+        recording.state,
+        recording.storageUri || null,
+        recording.startedAt,
+        recording.stoppedAt || null,
+        recording.durationMs || null,
+        recording.sizeBytes || null
+      ]
+    );
+  }
+
+  async upsertDisposition(disposition) {
+    if (!this.pool) return;
+    await this.pool.query(
+      `
+      INSERT INTO vc_dispositions (session_id, outcome, notes, resolved_by, resolved_at)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (session_id) DO UPDATE SET
+        outcome = EXCLUDED.outcome,
+        notes = EXCLUDED.notes,
+        resolved_by = EXCLUDED.resolved_by,
+        resolved_at = EXCLUDED.resolved_at
+      `,
+      [
+        disposition.sessionId,
+        disposition.outcome,
+        disposition.notes || null,
+        disposition.resolvedBy || null,
+        disposition.resolvedAt
       ]
     );
   }

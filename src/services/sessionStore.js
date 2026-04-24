@@ -16,6 +16,9 @@ class SessionStore {
       externalRef,
       metadata,
       status: "created",
+      inviteLinks: [],
+      inviteSentAt: null,
+      disposition: null,
       createdAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
       participants: new Map(),
@@ -94,7 +97,25 @@ class SessionStore {
     const session = this.getSession(sessionId);
     if (!session) return null;
     session.status = "ended";
+    session.endedAt = new Date().toISOString();
     session.participants.clear();
+    session.lastActivityAt = new Date().toISOString();
+    return session;
+  }
+
+  addInviteLink(sessionId, invite) {
+    const session = this.getSession(sessionId);
+    if (!session) return null;
+    session.inviteLinks.push(invite);
+    session.inviteSentAt = invite.sentAt || new Date().toISOString();
+    session.lastActivityAt = new Date().toISOString();
+    return session;
+  }
+
+  setDisposition(sessionId, disposition) {
+    const session = this.getSession(sessionId);
+    if (!session) return null;
+    session.disposition = disposition;
     session.lastActivityAt = new Date().toISOString();
     return session;
   }

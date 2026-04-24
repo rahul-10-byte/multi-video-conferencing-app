@@ -17,6 +17,8 @@ const { MediasoupService } = require("./services/mediasoupService");
 const { EventBus } = require("./services/eventBus");
 const { KafkaEventProducer } = require("./services/kafkaEventProducer");
 const { PostgresReadModel } = require("./services/postgresReadModel");
+const { OtpService } = require("./services/otpService");
+const { RecordingService } = require("./services/recordingService");
 const { setupWebSocketServer } = require("./ws");
 
 const app = express();
@@ -55,6 +57,12 @@ let kafkaProducer = null;
 let eventBus = new EventBus();
 let redis = null;
 let readModel = null;
+const otpService = new OtpService({
+  ttlSeconds: config.otpTtlSeconds,
+  maxAttempts: config.otpMaxAttempts,
+  fixedCode: config.testOtpCode
+});
+const recordingService = new RecordingService();
 const nodeId = `node_${uuidv7().replaceAll("-", "")}`;
 let reconnectWorkerRunning = false;
 
@@ -116,6 +124,7 @@ app.post("/v1/sessions", async (req, res) => {
     return;
   }
   const session = sessionStore.createSession({ externalRef, metadata, ttlSeconds });
+  await readModel?.upsertSession(session);
   await eventBus.emit("session_created", { sessionId: session.sessionId, data: { metadata, externalRef } });
   res.status(201).json({
     sessionId: session.sessionId,
@@ -144,6 +153,10 @@ app.post("/v1/sessions/:sessionId/join-token", requireApiKey, (req, res) => {
   const session = sessionStore.getSession(sessionId);
   if (!session) {
     res.status(404).json({ error: "session_not_found" });
+    return;
+  }
+  if (role === "customer" && !otpService.consumeVerified(sessionId, participantId)) {
+    res.status(403).json({ error: "otp_verification_required" });
     return;
   }
 
@@ -219,6 +232,66 @@ app.get("/v1/sessions/:sessionId/participants", requireApiKey, (req, res) => {
   res.json({ participants, total: participants.length });
 });
 
+app.post("/v1/sessions/:sessionId/customer-invite", requireApiKey, async (req, res) => {
+  const { sessionId } = req.params;
+  const { participantId, channel = "link" } = req.body || {};
+  if (!participantId) {
+    res.status(400).json({ error: "participantId is required" });
+    return;
+  }
+  const session = sessionStore.getSession(sessionId);
+  if (!session) {
+    res.status(404).json({ error: "session_not_found" });
+    return;
+  }
+  const challenge = otpService.issueChallenge(sessionId, participantId);
+  const sentAt = new Date().toISOString();
+  const inviteLink = `${config.customerInviteBaseUrl}?sessionId=${encodeURIComponent(sessionId)}&participantId=${encodeURIComponent(participantId)}`;
+  sessionStore.addInviteLink(sessionId, inviteLink);
+  await readModel?.appendInviteLink(sessionId, inviteLink, sentAt);
+  await readModel?.upsertSession(sessionStore.getSession(sessionId));
+  await eventBus.emit("customer_invited", {
+    sessionId,
+    participantId,
+    role: "customer",
+    channel,
+    inviteLink,
+    testMode: true
+  });
+  res.json({
+    sessionId,
+    participantId,
+    inviteLink,
+    sentAt,
+    otp: {
+      testMode: true,
+      code: config.testOtpCode,
+      expiresAt: challenge.expiresAt
+    }
+  });
+});
+
+app.post("/v1/sessions/:sessionId/customer-verify-otp", async (req, res) => {
+  const { sessionId } = req.params;
+  const { participantId, otp } = req.body || {};
+  if (!participantId || !otp) {
+    res.status(400).json({ error: "participantId and otp are required" });
+    return;
+  }
+  const session = sessionStore.getSession(sessionId);
+  if (!session) {
+    res.status(404).json({ error: "session_not_found" });
+    return;
+  }
+  const result = otpService.verify(sessionId, participantId, otp);
+  if (!result.ok) {
+    res.status(400).json({ error: result.reason, attemptsLeft: result.attemptsLeft ?? null });
+    return;
+  }
+  await eventBus.emit("otp_verified", { sessionId, participantId, role: "customer", verifiedAt: result.verifiedAt });
+  res.json({ sessionId, participantId, verified: true, verifiedAt: result.verifiedAt });
+});
+
 app.post("/v1/sessions/:sessionId/leave", requireApiKey, async (req, res) => {
   const { sessionId } = req.params;
   const session = sessionStore.leaveSession(sessionId);
@@ -226,8 +299,80 @@ app.post("/v1/sessions/:sessionId/leave", requireApiKey, async (req, res) => {
     res.status(404).json({ error: "session_not_found" });
     return;
   }
+  await readModel?.upsertSession(session);
   await eventBus.emit("session_ended", { sessionId, reason: "api_leave" });
   res.json({ sessionId, status: session.status, endedAt: new Date().toISOString() });
+});
+
+app.post("/v1/sessions/:sessionId/recording/start", requireApiKey, async (req, res) => {
+  const { sessionId } = req.params;
+  const { initiatedBy = "system" } = req.body || {};
+  const session = sessionStore.getSession(sessionId);
+  if (!session) {
+    res.status(404).json({ error: "session_not_found" });
+    return;
+  }
+  const result = recordingService.start(sessionId, initiatedBy);
+  if (!result.ok) {
+    res.status(409).json({ error: result.reason });
+    return;
+  }
+  await readModel?.saveRecording(result.recording);
+  await eventBus.emit("recording_started", {
+    sessionId,
+    recordingId: result.recording.recordingId,
+    initiatedBy
+  });
+  res.json({ recording: result.recording });
+});
+
+app.post("/v1/sessions/:sessionId/recording/stop", requireApiKey, async (req, res) => {
+  const { sessionId } = req.params;
+  const { stoppedBy = "system" } = req.body || {};
+  const session = sessionStore.getSession(sessionId);
+  if (!session) {
+    res.status(404).json({ error: "session_not_found" });
+    return;
+  }
+  const result = recordingService.stop(sessionId, stoppedBy);
+  if (!result.ok) {
+    res.status(409).json({ error: result.reason });
+    return;
+  }
+  await readModel?.saveRecording(result.recording);
+  await eventBus.emit("recording_stopped", {
+    sessionId,
+    recordingId: result.recording.recordingId,
+    stoppedBy,
+    durationMs: result.recording.durationMs
+  });
+  res.json({ recording: result.recording });
+});
+
+app.post("/v1/sessions/:sessionId/disposition", requireApiKey, async (req, res) => {
+  const { sessionId } = req.params;
+  const { outcome, notes = null, resolvedBy = null } = req.body || {};
+  const allowedOutcomes = new Set(["resolved", "follow_up", "dropped"]);
+  if (!allowedOutcomes.has(outcome)) {
+    res.status(400).json({ error: "invalid_outcome" });
+    return;
+  }
+  const session = sessionStore.getSession(sessionId);
+  if (!session) {
+    res.status(404).json({ error: "session_not_found" });
+    return;
+  }
+  const disposition = {
+    sessionId,
+    outcome,
+    notes,
+    resolvedBy,
+    resolvedAt: new Date().toISOString()
+  };
+  sessionStore.setDisposition(sessionId, disposition);
+  await readModel?.upsertDisposition(disposition);
+  await eventBus.emit("session_dispositioned", disposition);
+  res.json({ disposition });
 });
 
 app.get("/v1/sessions/:sessionId", requireApiKey, (req, res) => {
@@ -244,7 +389,10 @@ app.get("/v1/sessions/:sessionId", requireApiKey, (req, res) => {
     expiresAt: session.expiresAt,
     lastActivityAt: session.lastActivityAt,
     participantCount: session.participants.size,
-    metadata: session.metadata
+    metadata: session.metadata,
+    inviteLinks: session.inviteLinks || [],
+    disposition: session.disposition || null,
+    activeRecording: recordingService.getActive(sessionId)
   });
 });
 

@@ -22,6 +22,10 @@ const config = {
   reconnectCleanupPollSeconds: intFromEnv("VC_RECONNECT_CLEANUP_POLL_SECONDS", 2),
   reconnectCleanupBatchSize: intFromEnv("VC_RECONNECT_CLEANUP_BATCH_SIZE", 100),
   reconnectCleanupLockSeconds: intFromEnv("VC_RECONNECT_CLEANUP_LOCK_SECONDS", 30),
+  customerInviteBaseUrl: process.env.VC_CUSTOMER_INVITE_BASE_URL || "http://localhost:3000/vc/join",
+  otpTtlSeconds: intFromEnv("VC_OTP_TTL_SECONDS", 300),
+  otpMaxAttempts: intFromEnv("VC_OTP_MAX_ATTEMPTS", 5),
+  testOtpCode: process.env.VC_TEST_OTP_CODE || "123456",
   redis: {
     url: process.env.REDIS_URL || "",
     keyPrefix: process.env.REDIS_KEY_PREFIX || "vc:"

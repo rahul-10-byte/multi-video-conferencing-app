@@ -7,9 +7,14 @@ Contract-first backend scaffold for Multi Video Conferencing App aligned to `MED
 - VC API v1 endpoint stubs:
   - `POST /v1/sessions`
   - `POST /v1/sessions/{sessionId}/join-token`
+  - `POST /v1/sessions/{sessionId}/customer-invite`
+  - `POST /v1/sessions/{sessionId}/customer-verify-otp`
   - `GET /v1/ice-servers`
   - `GET /v1/sessions/{sessionId}/participants`
   - `POST /v1/sessions/{sessionId}/leave`
+  - `POST /v1/sessions/{sessionId}/recording/start`
+  - `POST /v1/sessions/{sessionId}/recording/stop`
+  - `POST /v1/sessions/{sessionId}/disposition`
   - `GET /v1/sessions/{sessionId}`
   - `GET /healthz`, `GET /readyz`, `GET /metrics`
 - WebSocket endpoint: `GET /v1/ws`
@@ -30,14 +35,22 @@ Contract-first backend scaffold for Multi Video Conferencing App aligned to `MED
   - `listProducers`
   - `consume`
   - `pauseProducer` / `resumeProducer`
+  - `chatSend` / `chatMessage`
+  - `deviceChanged`
 - OpenAPI contract and WS schema under `contracts/`.
 - Admin read-model endpoints:
   - `GET /v1/admin/sessions`
   - `GET /v1/admin/sessions/{sessionId}/events`
+- Lean SQL read-model tables:
+  - `vc_sessions` (includes `invite_links`)
+  - `vc_recordings`
+  - `vc_dispositions`
+  - `vc_session_events`
 
 ## Not yet implemented
 
 - TURN REST short-lived credential issuance.
+- Production OTP/SMS/email provider integration (current OTP is in-memory test mode).
 
 ## Run
 
@@ -55,3 +68,23 @@ npm run dev
 ```
 
 Server default URL: `http://localhost:9000`
+
+## Scalability testing
+
+Use the end-to-end signaling load kit in `load-tests/`:
+
+- Script: `load-tests/k6-signaling-rooms.js`
+- Media bot runner: `load-tests/media-bot-runner.js`
+- Guide: `load-tests/README.md`
+
+Example run:
+
+```bash
+k6 run \
+  -e BASE_URL=https://test.heavenhue.in \
+  -e API_KEY=123456789 \
+  -e ROOM_COUNT=250 \
+  -e USERS_PER_ROOM=3 \
+  -e VUS=150 \
+  load-tests/k6-signaling-rooms.js
+```
