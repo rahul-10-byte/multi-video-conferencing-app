@@ -236,15 +236,15 @@ class RecordingService {
 
     if (videoCount > 0) {
       if (videoCount === 1) {
-        filters.push("[0:v:0]format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
+        filters.push("[0:v:0]setpts=PTS-STARTPTS,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
       } else if (videoCount === 2) {
-        filters.push("[0:v:0]format=yuv420p,scale=640:720[v0]");
-        filters.push("[0:v:1]format=yuv420p,scale=640:720[v1]");
+        filters.push("[0:v:0]setpts=PTS-STARTPTS,format=yuv420p,scale=640:720[v0]");
+        filters.push("[0:v:1]setpts=PTS-STARTPTS,format=yuv420p,scale=640:720[v1]");
         filters.push("[v0][v1]hstack=inputs=2[vout]");
       } else {
         const capped = Math.min(videoCount, 4);
         for (let i = 0; i < capped; i += 1) {
-          filters.push(`[0:v:${i}]format=yuv420p,scale=640:360[v${i}]`);
+          filters.push(`[0:v:${i}]setpts=PTS-STARTPTS,format=yuv420p,scale=640:360[v${i}]`);
         }
         const joined = Array.from({ length: capped }, (_v, i) => `[v${i}]`).join("");
         const layout = capped === 3 ? "0_0|640_0|0_360" : "0_0|640_0|0_360|640_360";
@@ -254,11 +254,11 @@ class RecordingService {
 
     if (audioCount > 0) {
       if (audioCount === 1) {
-        filters.push("[0:a:0]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]");
+        filters.push("[0:a:0]asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]");
       } else {
         const capped = Math.min(audioCount, 6);
-        const inputs = Array.from({ length: capped }, (_v, i) => `[0:a:${i}]`).join("");
-        filters.push(`${inputs}amix=inputs=${capped}:duration=longest:dropout_transition=2[aout]`);
+        const inputs = Array.from({ length: capped }, (_v, i) => `[0:a:${i}]asetpts=PTS-STARTPTS[a${i}]`).join(";");
+        filters.push(`${inputs};${Array.from({ length: capped }, (_v, i) => `[a${i}]`).join("")}amix=inputs=${capped}:duration=longest:dropout_transition=2[aout]`);
       }
     }
 
