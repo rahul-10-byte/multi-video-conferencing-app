@@ -97,7 +97,7 @@ class RecordingService {
         stderrTail = `${stderrTail}${chunk.toString()}`.slice(-4000);
       });
       ffmpeg.on("exit", (code) => {
-        if (code !== 0 && code !== null) {
+        if (!recording._stopping && code !== 0 && code !== null) {
           // eslint-disable-next-line no-console
           console.error(`recording_ffmpeg_exit_nonzero session=${sessionId} code=${code} detail=${stderrTail}`);
         }
@@ -120,6 +120,7 @@ class RecordingService {
         _ffmpeg: ffmpeg,
         _sdpFile: sdpFile,
         _taps: taps,
+        _stopping: false,
         _getStderrTail: () => stderrTail
       };
       this.activeBySession.set(sessionId, recording);
@@ -142,6 +143,7 @@ class RecordingService {
     const durationMs = Math.max(new Date(stoppedAt).getTime() - new Date(active.startedAt).getTime(), 0);
 
     if (active._ffmpeg && !active._ffmpeg.killed) {
+      active._stopping = true;
       active._ffmpeg.kill("SIGINT");
       await new Promise((resolve) => {
         const timer = setTimeout(resolve, 3000);
