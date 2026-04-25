@@ -204,7 +204,7 @@ class RecordingService {
       "-fflags", "+genpts",
       "-analyzeduration", "5000000",
       "-probesize", "32000000",
-      "-rtptimeout", "20000000",
+      "-max_delay", "5000000",
       "-f", "sdp",
       "-i", sdpFile
     ];
