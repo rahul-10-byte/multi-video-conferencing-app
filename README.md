@@ -18,15 +18,14 @@ Contract-first backend scaffold for Multi Video Conferencing App aligned to `MED
   - `GET /v1/sessions/{sessionId}`
   - `GET /healthz`, `GET /readyz`, `GET /metrics`
 - WebSocket endpoint: `GET /v1/ws`
-- Join token validation with replay protection (`jti` single-use), with optional Redis-backed distributed replay store.
+- Join token validation with replay protection (`jti` single-use).
 - In-memory session and participant store with TTL sweeper.
 - Mediasoup worker startup and per-session router lifecycle.
 - Optional API key protection for admin/control REST routes (`VC_API_KEY`).
 - Reconnect grace handling (`VC_RECONNECT_GRACE_SECONDS`) with state transition to `reconnecting`.
-- Distributed reconnect cleanup worker with Redis lock ownership (`VC_RECONNECT_CLEANUP_*`).
+- Reconnect cleanup worker (`VC_RECONNECT_CLEANUP_*`).
 - Structured event emission (`EVENT_JSON`) for `session_created`, `participant_joined`, `participant_left`, `session_ended`.
 - Quality telemetry ingest (`qualityReport`) with Prometheus metrics and `quality_alert` events.
-- Optional Kafka publishing for emitted events (`KAFKA_BROKERS`, `KAFKA_EVENTS_TOPIC`).
 - Optional Postgres read model persistence for events (`DATABASE_URL`).
 - WebRTC transport/producers/consumers flow over WS:
   - `createTransport`

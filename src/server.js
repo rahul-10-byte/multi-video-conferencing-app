@@ -1,7 +1,6 @@
 const http = require("http");
 const path = require("path");
 const express = require("express");
-const Redis = require("ioredis");
 const { v7: uuidv7 } = require("uuid");
 const { config } = require("./config");
 const { registry, reconnectTimeoutTotal, backendErrorsTotal } = require("./metrics");
@@ -9,13 +8,10 @@ const { SessionStore } = require("./services/sessionStore");
 const { TokenService } = require("./services/tokenService");
 const {
   InMemoryReplayStore,
-  RedisReplayStore,
-  InMemoryReconnectStore,
-  RedisReconnectStore
+  InMemoryReconnectStore
 } = require("./services/stateStores");
 const { MediasoupService } = require("./services/mediasoupService");
 const { EventBus } = require("./services/eventBus");
-const { KafkaEventProducer } = require("./services/kafkaEventProducer");
 const { PostgresReadModel } = require("./services/postgresReadModel");
 const { OtpService } = require("./services/otpService");
 const { RecordingService } = require("./services/recordingService");
@@ -53,9 +49,7 @@ const mediasoupService = new MediasoupService(config.mediasoup);
 let replayStore = new InMemoryReplayStore();
 let reconnectStore = new InMemoryReconnectStore();
 let tokenService = new TokenService(config, replayStore);
-let kafkaProducer = null;
 let eventBus = new EventBus();
-let redis = null;
 let readModel = null;
 const otpService = new OtpService({
   ttlSeconds: config.otpTtlSeconds,
@@ -482,28 +476,14 @@ async function processReconnectTimeouts() {
 }
 
 async function start() {
-  if (config.redis.url) {
-    redis = new Redis(config.redis.url);
-    await redis.ping();
-    replayStore = new RedisReplayStore(redis, config.redis.keyPrefix);
-    reconnectStore = new RedisReconnectStore(redis, config.redis.keyPrefix);
-    tokenService = new TokenService(config, replayStore);
-    // eslint-disable-next-line no-console
-    console.log("redis connected");
-  } else {
-    // eslint-disable-next-line no-console
-    console.log("redis disabled (in-memory fallback active)");
-  }
-
-  kafkaProducer = new KafkaEventProducer(config.kafka);
-  await kafkaProducer.connect();
-  // eslint-disable-next-line no-console
-  console.log(config.kafka.brokers.length > 0 ? "kafka connected" : "kafka disabled (log-only events active)");
+  replayStore = new InMemoryReplayStore();
+  reconnectStore = new InMemoryReconnectStore();
+  tokenService = new TokenService(config, replayStore);
   readModel = new PostgresReadModel(config.db);
   await readModel.connect();
   // eslint-disable-next-line no-console
   console.log(readModel.enabled ? "postgres read model connected" : "postgres read model disabled");
-  eventBus = new EventBus({ producer: kafkaProducer, readModel });
+  eventBus = new EventBus({ readModel });
 
   setupWebSocketServer({
     server,

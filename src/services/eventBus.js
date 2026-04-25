@@ -1,8 +1,7 @@
 const { v7: uuidv7 } = require("uuid");
 
 class EventBus {
-  constructor({ producer = null, readModel = null } = {}) {
-    this.producer = producer;
+  constructor({ readModel = null } = {}) {
     this.readModel = readModel;
   }
 
@@ -16,14 +15,6 @@ class EventBus {
     // JSON line for ingest by log pipeline.
     // eslint-disable-next-line no-console
     console.log(`EVENT_JSON: ${JSON.stringify(envelope)}`);
-    if (this.producer) {
-      try {
-        await this.producer.publish(envelope);
-      } catch (error) {
-        // eslint-disable-next-line no-console
-        console.error("event_publish_failed", error?.message || error);
-      }
-    }
     if (this.readModel) {
       try {
         await this.readModel.persistEvent(envelope);

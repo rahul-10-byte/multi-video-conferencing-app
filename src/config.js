@@ -26,18 +26,6 @@ const config = {
   otpTtlSeconds: intFromEnv("VC_OTP_TTL_SECONDS", 300),
   otpMaxAttempts: intFromEnv("VC_OTP_MAX_ATTEMPTS", 5),
   testOtpCode: process.env.VC_TEST_OTP_CODE || "123456",
-  redis: {
-    url: process.env.REDIS_URL || "",
-    keyPrefix: process.env.REDIS_KEY_PREFIX || "vc:"
-  },
-  kafka: {
-    brokers: (process.env.KAFKA_BROKERS || "")
-      .split(",")
-      .map((v) => v.trim())
-      .filter(Boolean),
-    clientId: process.env.KAFKA_CLIENT_ID || "vc-backend",
-    topic: process.env.KAFKA_EVENTS_TOPIC || "vc.events"
-  },
   db: {
     url: process.env.DATABASE_URL || "",
     ssl: (process.env.DATABASE_SSL || "false").toLowerCase() === "true",

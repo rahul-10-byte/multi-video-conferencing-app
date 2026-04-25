@@ -18,22 +18,6 @@ class InMemoryReplayStore {
   }
 }
 
-class RedisReplayStore {
-  constructor(redis, keyPrefix = "vc:") {
-    this.redis = redis;
-    this.keyPrefix = keyPrefix;
-  }
-
-  async consume(jti, expUnixSeconds) {
-    const ttl = Math.max(expUnixSeconds - Math.floor(Date.now() / 1000), 1);
-    const key = `${this.keyPrefix}replay:${jti}`;
-    const result = await this.redis.set(key, "1", "EX", ttl, "NX");
-    return result === "OK";
-  }
-
-  sweep() {}
-}
-
 class InMemoryReconnectStore {
   constructor() {
     this.states = new Map();
@@ -91,92 +75,7 @@ class InMemoryReconnectStore {
   }
 }
 
-class RedisReconnectStore {
-  constructor(redis, keyPrefix = "vc:") {
-    this.redis = redis;
-    this.keyPrefix = keyPrefix;
-  }
-
-  async setReconnecting(sessionId, participantId, role, ttlSeconds) {
-    const ttl = Math.max(ttlSeconds, 1);
-    const key = `${this.keyPrefix}reconnect:${sessionId}:${participantId}`;
-    const payload = JSON.stringify({
-      sessionId,
-      participantId,
-      role,
-      expiresAtMs: Date.now() + ttl * 1000
-    });
-    await this.redis
-      .multi()
-      .set(key, payload, "EX", ttl)
-      .zadd(`${this.keyPrefix}reconnect:deadline`, Date.now() + ttl * 1000, `${sessionId}:${participantId}`)
-      .exec();
-  }
-
-  async consumeReconnecting(sessionId, participantId) {
-    const key = `${this.keyPrefix}reconnect:${sessionId}:${participantId}`;
-    const identifier = `${sessionId}:${participantId}`;
-    const payload = await this.redis.get(key);
-    if (!payload) return null;
-    await this.redis.multi().del(key).zrem(`${this.keyPrefix}reconnect:deadline`, identifier).exec();
-    try {
-      return JSON.parse(payload);
-    } catch (_err) {
-      return null;
-    }
-  }
-
-  async listExpired(nowMs, limit = 100) {
-    const identifiers = await this.redis.zrangebyscore(
-      `${this.keyPrefix}reconnect:deadline`,
-      0,
-      nowMs,
-      "LIMIT",
-      0,
-      limit
-    );
-    const results = [];
-    for (const identifier of identifiers) {
-      const [sessionId, participantId] = identifier.split(":");
-      const state = await this.getReconnecting(sessionId, participantId);
-      if (state && state.expiresAtMs <= nowMs) {
-        results.push(state);
-      }
-    }
-    return results;
-  }
-
-  async claimCleanup(sessionId, participantId, ownerId, lockSeconds) {
-    const key = `${this.keyPrefix}reconnect-lock:${sessionId}:${participantId}`;
-    const result = await this.redis.set(key, ownerId, "EX", Math.max(lockSeconds, 1), "NX");
-    return result === "OK";
-  }
-
-  async getReconnecting(sessionId, participantId) {
-    const key = `${this.keyPrefix}reconnect:${sessionId}:${participantId}`;
-    const payload = await this.redis.get(key);
-    if (!payload) return null;
-    try {
-      return JSON.parse(payload);
-    } catch (_err) {
-      return null;
-    }
-  }
-
-  async clearReconnecting(sessionId, participantId) {
-    const identifier = `${sessionId}:${participantId}`;
-    await this.redis
-      .multi()
-      .del(`${this.keyPrefix}reconnect:${identifier}`)
-      .del(`${this.keyPrefix}reconnect-lock:${identifier}`)
-      .zrem(`${this.keyPrefix}reconnect:deadline`, identifier)
-      .exec();
-  }
-}
-
 module.exports = {
   InMemoryReplayStore,
-  RedisReplayStore,
-  InMemoryReconnectStore,
-  RedisReconnectStore
+  InMemoryReconnectStore
 };
