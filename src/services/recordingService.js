@@ -45,7 +45,7 @@ class RecordingService {
       const consumer = await transport.consume({
         producerId: ref.producerId,
         rtpCapabilities: room.router.rtpCapabilities,
-        paused: false
+        paused: true
       });
       taps.push({
         kind: ref.kind,
@@ -69,10 +69,27 @@ class RecordingService {
       for (const ref of videoRefs) {
         await addTap(ref);
       }
+
       const sdp = this.buildSdp(taps);
       await fsp.writeFile(sdpFile, sdp, "utf8");
       const ffmpegArgs = this.buildFfmpegArgs(taps, sdpFile, outputFile);
       const ffmpeg = spawn(this.config.ffmpegPath || "ffmpeg", ffmpegArgs, { stdio: ["ignore", "pipe", "pipe"] });
+
+      setTimeout(async () => {
+        for (const tap of taps) {
+          try {
+            await tap.consumer.resume();
+          } catch (_err) {}
+        }
+        for (const tap of taps) {
+          if (tap.kind !== "video") continue;
+          if (tap.producer && typeof tap.producer.requestKeyFrame === "function") {
+            try {
+              await tap.producer.requestKeyFrame();
+            } catch (_err) {}
+          }
+        }
+      }, this.config.keyframeWarmupMs || 1500);
 
       ffmpeg.stdout.on("data", () => {});
       let stderrTail = "";
