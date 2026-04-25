@@ -55,6 +55,11 @@ class RecordingService {
         consumer,
         rtpPort
       });
+      if (ref.kind === "video" && ref.producer && typeof ref.producer.requestKeyFrame === "function") {
+        try {
+          await ref.producer.requestKeyFrame();
+        } catch (_err) {}
+      }
     };
 
     try {
