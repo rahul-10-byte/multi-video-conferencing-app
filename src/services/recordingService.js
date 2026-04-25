@@ -141,11 +141,6 @@ class RecordingService {
     const stoppedAt = new Date().toISOString();
     const durationMs = Math.max(new Date(stoppedAt).getTime() - new Date(active.startedAt).getTime(), 0);
 
-    for (const tap of active._taps || []) {
-      try { tap.consumer.close(); } catch (_e) {}
-      try { tap.transport.close(); } catch (_e) {}
-    }
-
     if (active._ffmpeg && !active._ffmpeg.killed) {
       active._ffmpeg.kill("SIGINT");
       await new Promise((resolve) => {
@@ -155,6 +150,11 @@ class RecordingService {
           resolve();
         });
       });
+    }
+
+    for (const tap of active._taps || []) {
+      try { tap.consumer.close(); } catch (_e) {}
+      try { tap.transport.close(); } catch (_e) {}
     }
 
     let sizeBytes = null;
