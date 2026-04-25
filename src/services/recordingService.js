@@ -202,6 +202,9 @@ class RecordingService {
       "-loglevel", "warning",
       "-protocol_whitelist", "file,udp,rtp",
       "-fflags", "+genpts",
+      "-analyzeduration", "5000000",
+      "-probesize", "32000000",
+      "-rtptimeout", "20000000",
       "-f", "sdp",
       "-i", sdpFile
     ];
@@ -241,7 +244,7 @@ class RecordingService {
       args.push("-filter_complex", filters.join(";"));
     }
     if (videoCount > 0) {
-      args.push("-map", "[vout]", "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "4");
+      args.push("-map", "[vout]", "-c:v", "libvpx", "-b:v", "2500k", "-minrate", "1500k", "-maxrate", "4000k", "-deadline", "good", "-cpu-used", "2");
     }
     if (audioCount > 0) {
       args.push("-map", "[aout]", "-c:a", "libopus");
