@@ -205,7 +205,6 @@ class RecordingService {
       "-analyzeduration", "10000000",
       "-probesize", "50000000",
       "-max_delay", "20000000",
-      "-allowed_delay", "5000000",
       "-f", "sdp",
       "-i", sdpFile
     ];
