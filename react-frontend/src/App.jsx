@@ -154,6 +154,11 @@ function IconLeave() {
   );
 }
 
+function hasLiveVideoTrack(stream) {
+  if (!stream) return false;
+  return stream.getVideoTracks().some((track) => track.readyState === 'live');
+}
+
 function VideoFrame({ stream, muted = false }) {
   const videoRef = useRef(null);
 
@@ -162,20 +167,21 @@ function VideoFrame({ stream, muted = false }) {
     videoRef.current.srcObject = stream || null;
   }, [stream]);
 
-  if (!stream || muted) return null;
+  if (!stream || muted || !hasLiveVideoTrack(stream)) return null;
 
   return <video ref={videoRef} className="video-tile__media" autoPlay playsInline muted />;
 }
 
 function ParticipantTile({ participant, compact = false, mediaStream = null, videoMuted = false }) {
   const presenceState = participant.state === 'reconnecting' ? 'Reconnecting...' : null;
+  const showVideo = Boolean(mediaStream) && !videoMuted && hasLiveVideoTrack(mediaStream);
   return (
     <article className={`video-tile ${compact ? 'video-tile--compact' : ''}`}>
       <div className="video-tile__frame">
         <div className="video-tile__rings" />
         <div className="video-tile__glow" />
         <VideoFrame stream={mediaStream} muted={videoMuted} />
-        {!mediaStream || videoMuted ? (
+        {!showVideo ? (
           <div className="video-tile__avatar">{initialsFromName(participant.displayName || participant.participantId)}</div>
         ) : null}
       </div>
@@ -1158,7 +1164,8 @@ export default function App() {
 
   async function toggleVideo() {
     if (!socketRef.current || !sessionInfo?.sessionId || !localStream) return;
-    if (localStream.getVideoTracks().length === 0) {
+    const currentLiveTrack = localStream.getVideoTracks().find((track) => track.readyState === 'live');
+    if (!currentLiveTrack) {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
         const [videoTrack] = stream.getVideoTracks();
