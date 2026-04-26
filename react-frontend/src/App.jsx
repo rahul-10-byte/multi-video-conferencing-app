@@ -159,7 +159,7 @@ function hasLiveVideoTrack(stream) {
   return stream.getVideoTracks().some((track) => track.readyState === 'live');
 }
 
-function VideoFrame({ stream, muted = false }) {
+function VideoFrame({ stream, hidden = false }) {
   const videoRef = useRef(null);
 
   useEffect(() => {
@@ -173,9 +173,9 @@ function VideoFrame({ stream, muted = false }) {
     }
   }, [stream]);
 
-  if (!stream || muted || !hasLiveVideoTrack(stream)) return null;
+  if (!stream || hidden || !hasLiveVideoTrack(stream)) return null;
 
-  return <video ref={videoRef} className="video-tile__media" autoPlay playsInline muted={muted} />;
+  return <video ref={videoRef} className="video-tile__media" autoPlay playsInline muted />;
 }
 
 function ParticipantTile({ participant, compact = false, mediaStream = null, videoMuted = false }) {
@@ -186,7 +186,7 @@ function ParticipantTile({ participant, compact = false, mediaStream = null, vid
       <div className="video-tile__frame">
         <div className="video-tile__rings" />
         <div className="video-tile__glow" />
-        <VideoFrame stream={mediaStream} muted={videoMuted} />
+        <VideoFrame stream={mediaStream} hidden={videoMuted} />
         {!showVideo ? (
           <div className="video-tile__avatar">{initialsFromName(participant.displayName || participant.participantId)}</div>
         ) : null}
@@ -628,6 +628,12 @@ export default function App() {
   const reconnectingRef = useRef(false);
   const intentionalLeaveRef = useRef(false);
   const connectionMetaRef = useRef(null);
+  const localStreamRef = useRef(null);
+
+  function updateLocalStream(nextStream) {
+    localStreamRef.current = nextStream;
+    setLocalStream(nextStream);
+  }
 
   function clearReconnectTimer() {
     if (reconnectTimerRef.current) {
@@ -676,12 +682,11 @@ export default function App() {
   }
 
   function stopLocalMedia() {
-    setLocalStream((current) => {
-      if (current) {
-        current.getTracks().forEach((track) => track.stop());
-      }
-      return null;
-    });
+    const current = localStreamRef.current;
+    if (current) {
+      current.getTracks().forEach((track) => track.stop());
+    }
+    updateLocalStream(null);
   }
 
   async function refreshVideoDevices(stream = localStream) {
@@ -717,12 +722,11 @@ export default function App() {
     stream.getVideoTracks().forEach((track) => {
       track.enabled = !videoMuted;
     });
-    setLocalStream((current) => {
-      if (current) {
-        current.getTracks().forEach((track) => track.stop());
-      }
-      return stream;
-    });
+    const current = localStreamRef.current;
+    if (current) {
+      current.getTracks().forEach((track) => track.stop());
+    }
+    updateLocalStream(stream);
     await refreshVideoDevices(stream).catch(() => {});
     return stream;
   }
@@ -1160,27 +1164,13 @@ export default function App() {
   }
 
   async function toggleAudio() {
-    if (!socketRef.current || !sessionInfo?.sessionId || !localStream) return;
-    if (localStream.getAudioTracks().length === 0) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        stream.getAudioTracks().forEach((track) => localStream.addTrack(track));
-        if (!audioProducerRef.current && sendTransportRef.current) {
-          const newAudioTrack = localStream.getAudioTracks()[0];
-          if (newAudioTrack) {
-            audioProducerRef.current = await sendTransportRef.current.produce({ track: newAudioTrack });
-          }
-        }
-      } catch (error) {
-        setJoinError(error.message || 'audio_device_unavailable');
-        return;
-      }
-    }
-    const nextMuted = !audioMuted;
+    const currentStream = localStreamRef.current;
+    if (!socketRef.current || !sessionInfo?.sessionId || !currentStream) return;
+    const track = currentStream.getAudioTracks()[0];
+    if (!track) return;
+    track.enabled = !track.enabled;
+    const nextMuted = !track.enabled;
     setAudioMuted(nextMuted);
-    localStream.getAudioTracks().forEach((track) => {
-      track.enabled = !nextMuted;
-    });
     try {
       await socketRef.current.request('deviceChanged', {
         device: `audio:${nextMuted ? 'muted' : 'live'}`,
@@ -1191,21 +1181,23 @@ export default function App() {
   }
 
   async function toggleVideo() {
-    if (!socketRef.current || !sessionInfo?.sessionId || !localStream) return;
+    const currentStream = localStreamRef.current;
+    if (!socketRef.current || !sessionInfo?.sessionId || !currentStream) return;
+    const activeTrack = currentStream.getVideoTracks()[0];
     if (!videoMuted) {
-      localStream.getVideoTracks().forEach((track) => {
-        localStream.removeTrack(track);
-        track.stop();
-      });
+      if (activeTrack) {
+        currentStream.removeTrack(activeTrack);
+        activeTrack.stop();
+      }
       if (videoProducerRef.current) {
         try {
           videoProducerRef.current.close();
         } catch (_error) {
-          // Ignore producer close errors.
+          // Ignore close errors.
         }
         videoProducerRef.current = null;
       }
-      setLocalStream(new MediaStream(localStream.getTracks()));
+      updateLocalStream(new MediaStream(currentStream.getTracks()));
       setVideoMuted(true);
       try {
         await socketRef.current.request('deviceChanged', {
@@ -1223,12 +1215,11 @@ export default function App() {
       if (!videoTrack) {
         throw new Error('video_track_missing');
       }
-      videoTrack.enabled = true;
-      localStream.getVideoTracks().forEach((track) => {
-        localStream.removeTrack(track);
+      currentStream.getVideoTracks().forEach((track) => {
+        currentStream.removeTrack(track);
         track.stop();
       });
-      localStream.addTrack(videoTrack);
+      currentStream.addTrack(videoTrack);
       if (sendTransportRef.current) {
         videoProducerRef.current = await sendTransportRef.current.produce({
           track: videoTrack,
@@ -1239,27 +1230,27 @@ export default function App() {
           ],
         });
       }
-      setLocalStream(new MediaStream(localStream.getTracks()));
-      await refreshVideoDevices(localStream).catch(() => {});
+      updateLocalStream(new MediaStream(currentStream.getTracks()));
+      await refreshVideoDevices(currentStream).catch(() => {});
       setVideoMuted(false);
       await socketRef.current.request('deviceChanged', {
         device: 'video:on',
       });
     } catch (error) {
       setJoinError(error.message || 'video_device_unavailable');
-      return;
     }
   }
 
   async function switchCamera() {
-    if (!socketRef.current || !sessionInfo?.sessionId || !localStream) return;
-    const cameras = await refreshVideoDevices(localStream).catch(() => []);
+    const currentStream = localStreamRef.current;
+    if (!socketRef.current || !sessionInfo?.sessionId || !currentStream) return;
     if (!videoProducerRef.current) {
-      setJoinError('Turn video on before switching camera.');
+      setJoinError('camera_switch_unavailable');
       return;
     }
+    const cameras = await refreshVideoDevices(currentStream).catch(() => []);
     if (!cameras || cameras.length < 2) {
-      setJoinError('No secondary camera found for switching.');
+      setJoinError('camera_switch_unavailable');
       return;
     }
     const nextIndex = (cameraIndexRef.current + 1) % cameras.length;
@@ -1274,15 +1265,15 @@ export default function App() {
         throw new Error('camera_track_missing');
       }
       newTrack.enabled = !videoMuted;
-      localStream.getVideoTracks().forEach((track) => {
-        localStream.removeTrack(track);
+      currentStream.getVideoTracks().forEach((track) => {
+        currentStream.removeTrack(track);
         track.stop();
       });
-      localStream.addTrack(newTrack);
-      setLocalStream(new MediaStream(localStream.getTracks()));
+      currentStream.addTrack(newTrack);
       if (videoProducerRef.current) {
         await videoProducerRef.current.replaceTrack({ track: newTrack });
       }
+      updateLocalStream(currentStream);
       cameraIndexRef.current = nextIndex;
       setCameraIndex(nextIndex);
       setCameraFacing(`camera-${nextIndex + 1}`);
@@ -1292,7 +1283,7 @@ export default function App() {
     }
     try {
       await socketRef.current.request('deviceChanged', {
-        device: `camera:${nextCamera.deviceId || nextIndex + 1}`,
+        device: 'camera_switched',
       });
     } catch (error) {
       setJoinError(error.message || 'camera_switch_failed');
