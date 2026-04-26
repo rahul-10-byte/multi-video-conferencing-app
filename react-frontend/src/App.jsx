@@ -1164,43 +1164,62 @@ export default function App() {
 
   async function toggleVideo() {
     if (!socketRef.current || !sessionInfo?.sessionId || !localStream) return;
-    const currentLiveTrack = localStream.getVideoTracks().find((track) => track.readyState === 'live');
-    if (!currentLiveTrack) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
-        const [videoTrack] = stream.getVideoTracks();
-        if (videoTrack) {
-          videoTrack.enabled = true;
-          localStream.addTrack(videoTrack);
-          if (!videoProducerRef.current && sendTransportRef.current) {
-            videoProducerRef.current = await sendTransportRef.current.produce({
-              track: videoTrack,
-              encodings: [
-                { rid: 'q', scaleResolutionDownBy: 4, maxBitrate: 150000 },
-                { rid: 'h', scaleResolutionDownBy: 2, maxBitrate: 500000 },
-                { rid: 'f', scaleResolutionDownBy: 1, maxBitrate: 1200000 },
-              ],
-            });
-          }
-          setLocalStream(new MediaStream(localStream.getTracks()));
-          await refreshVideoDevices(localStream).catch(() => {});
+    if (!videoMuted) {
+      localStream.getVideoTracks().forEach((track) => {
+        localStream.removeTrack(track);
+        track.stop();
+      });
+      if (videoProducerRef.current) {
+        try {
+          videoProducerRef.current.close();
+        } catch (_error) {
+          // Ignore producer close errors.
         }
-      } catch (error) {
-        setJoinError(error.message || 'video_device_unavailable');
-        return;
+        videoProducerRef.current = null;
       }
+      setLocalStream(new MediaStream(localStream.getTracks()));
+      setVideoMuted(true);
+      try {
+        await socketRef.current.request('deviceChanged', {
+          device: 'video:off',
+        });
+      } catch (error) {
+        setJoinError(error.message || 'video_toggle_failed');
+      }
+      return;
     }
-    const nextMuted = !videoMuted;
-    setVideoMuted(nextMuted);
-    localStream.getVideoTracks().forEach((track) => {
-      track.enabled = !nextMuted;
-    });
+
     try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+      const [videoTrack] = stream.getVideoTracks();
+      if (!videoTrack) {
+        throw new Error('video_track_missing');
+      }
+      videoTrack.enabled = true;
+      localStream.getVideoTracks().forEach((track) => {
+        localStream.removeTrack(track);
+        track.stop();
+      });
+      localStream.addTrack(videoTrack);
+      if (sendTransportRef.current) {
+        videoProducerRef.current = await sendTransportRef.current.produce({
+          track: videoTrack,
+          encodings: [
+            { rid: 'q', scaleResolutionDownBy: 4, maxBitrate: 150000 },
+            { rid: 'h', scaleResolutionDownBy: 2, maxBitrate: 500000 },
+            { rid: 'f', scaleResolutionDownBy: 1, maxBitrate: 1200000 },
+          ],
+        });
+      }
+      setLocalStream(new MediaStream(localStream.getTracks()));
+      await refreshVideoDevices(localStream).catch(() => {});
+      setVideoMuted(false);
       await socketRef.current.request('deviceChanged', {
-        device: `video:${nextMuted ? 'off' : 'on'}`,
+        device: 'video:on',
       });
     } catch (error) {
-      setJoinError(error.message || 'video_toggle_failed');
+      setJoinError(error.message || 'video_device_unavailable');
+      return;
     }
   }
 
