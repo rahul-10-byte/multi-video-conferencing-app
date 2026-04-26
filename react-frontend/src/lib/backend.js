@@ -30,6 +30,7 @@ export function buildHeaders(apiKey) {
 export async function requestJson(baseUrl, pathname, { method = 'GET', body, apiKey } = {}) {
   const response = await fetch(buildApiUrl(baseUrl, pathname), {
     method,
+    cache: 'no-store',
     headers: buildHeaders(apiKey),
     body: body === undefined ? undefined : JSON.stringify(body),
   });

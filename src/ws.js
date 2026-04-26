@@ -188,6 +188,12 @@ function setupWebSocketServer({
             participantId: claims.sub,
             role: claims.role
           });
+          broadcastToSession(claims.sid, "participantPresence", {
+            sessionId: claims.sid,
+            participantId: claims.sub,
+            role: claims.role,
+            state: wasReconnecting ? "reconnected" : "connected"
+          });
           send(ws, "joined", {
             sessionId: claims.sid,
             participantId: claims.sub,
@@ -329,6 +335,12 @@ function setupWebSocketServer({
               role: ws.role,
               reason: "explicit_leave"
             });
+            broadcastToSession(ws.sessionId, "participantPresence", {
+              sessionId: ws.sessionId,
+              participantId: ws.participantId,
+              role: ws.role,
+              state: "left"
+            });
           }
           send(ws, "left", {}, requestId);
           return;
@@ -432,6 +444,12 @@ function setupWebSocketServer({
       if (ws.sessionId && ws.participantId) {
         removeSocketFromSession(ws.sessionId, ws);
         sessionStore.setParticipantState(ws.sessionId, ws.participantId, "reconnecting");
+        broadcastToSession(ws.sessionId, "participantPresence", {
+          sessionId: ws.sessionId,
+          participantId: ws.participantId,
+          role: ws.role,
+          state: "reconnecting"
+        });
         reconnectAttemptsTotal.inc();
         try {
           await reconnectStore.setReconnecting(

@@ -176,6 +176,18 @@ select {
   gap: 8px;
 }
 
+.reconnect-banner {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid #d6a500;
+  background: #fff8d6;
+  color: #4a3b00;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
 .status-pill,
 .ghost-button,
 .primary-button,
@@ -183,6 +195,11 @@ select {
 .control-button {
   border-radius: 999px;
   border: 1px solid #1b1b1b;
+}
+
+.control-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .status-pill {
@@ -427,6 +444,12 @@ select {
   font-size: 0.85rem;
   font-weight: 600;
   color: #2a2a2a;
+}
+
+.video-tile__state {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #8a6f00;
 }
 
 .control-dock {
