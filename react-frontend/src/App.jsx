@@ -165,6 +165,12 @@ function VideoFrame({ stream, muted = false }) {
   useEffect(() => {
     if (!videoRef.current) return;
     videoRef.current.srcObject = stream || null;
+    if (stream) {
+      const playPromise = videoRef.current.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(() => {});
+      }
+    }
   }, [stream]);
 
   if (!stream || muted || !hasLiveVideoTrack(stream)) return null;
@@ -583,6 +589,7 @@ export default function App() {
   const [participantStreams, setParticipantStreams] = useState({});
   const [cameraIndex, setCameraIndex] = useState(0);
   const availableCamerasRef = useRef([]);
+  const cameraIndexRef = useRef(0);
   const socketRef = useRef(null);
   const deviceRef = useRef(null);
   const sendTransportRef = useRef(null);
@@ -660,7 +667,9 @@ export default function App() {
     const currentTrack = stream?.getVideoTracks?.()[0];
     const currentDeviceId = currentTrack?.getSettings?.().deviceId;
     const idx = cameras.findIndex((camera) => camera.deviceId === currentDeviceId);
-    setCameraIndex(idx >= 0 ? idx : 0);
+    const resolvedIdx = idx >= 0 ? idx : 0;
+    cameraIndexRef.current = resolvedIdx;
+    setCameraIndex(resolvedIdx);
     return cameras;
   }
 
@@ -817,11 +826,10 @@ export default function App() {
   function attachConsumerTrack(participantKey, producerId, track, consumer) {
     setParticipantStreams((current) => {
       const next = { ...current };
-      const stream = next[participantKey] || new MediaStream();
-      if (!stream.getTracks().some((item) => item.id === track.id)) {
-        stream.addTrack(track);
-      }
-      next[participantKey] = stream;
+      const existingStream = next[participantKey];
+      const existingTracks = existingStream ? existingStream.getTracks() : [];
+      const dedupedTracks = existingTracks.filter((item) => item.id !== track.id);
+      next[participantKey] = new MediaStream([...dedupedTracks, track]);
       return next;
     });
     consumersByProducerRef.current.set(producerId, { participantId: participantKey, consumer, track });
@@ -834,15 +842,11 @@ export default function App() {
       const stream = current[linked.participantId];
       if (!stream) return current;
       const next = { ...current };
-      stream.getTracks().forEach((track) => {
-        if (track.id === linked.track.id) {
-          stream.removeTrack(track);
-        }
-      });
-      if (stream.getTracks().length === 0) {
+      const remainingTracks = stream.getTracks().filter((track) => track.id !== linked.track.id);
+      if (remainingTracks.length === 0) {
         delete next[linked.participantId];
       } else {
-        next[linked.participantId] = stream;
+        next[linked.participantId] = new MediaStream(remainingTracks);
       }
       return next;
     });
@@ -1226,11 +1230,15 @@ export default function App() {
   async function switchCamera() {
     if (!socketRef.current || !sessionInfo?.sessionId || !localStream) return;
     const cameras = await refreshVideoDevices(localStream).catch(() => []);
+    if (!videoProducerRef.current) {
+      setJoinError('Turn video on before switching camera.');
+      return;
+    }
     if (!cameras || cameras.length < 2) {
       setJoinError('No secondary camera found for switching.');
       return;
     }
-    const nextIndex = (cameraIndex + 1) % cameras.length;
+    const nextIndex = (cameraIndexRef.current + 1) % cameras.length;
     const nextCamera = cameras[nextIndex];
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -1251,6 +1259,7 @@ export default function App() {
       if (videoProducerRef.current) {
         await videoProducerRef.current.replaceTrack({ track: newTrack });
       }
+      cameraIndexRef.current = nextIndex;
       setCameraIndex(nextIndex);
       setCameraFacing(`camera-${nextIndex + 1}`);
     } catch (error) {
