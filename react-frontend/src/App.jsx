@@ -175,7 +175,7 @@ function VideoFrame({ stream, muted = false }) {
 
   if (!stream || muted || !hasLiveVideoTrack(stream)) return null;
 
-  return <video ref={videoRef} className="video-tile__media" autoPlay playsInline muted />;
+  return <video ref={videoRef} className="video-tile__media" autoPlay playsInline muted={muted} />;
 }
 
 function ParticipantTile({ participant, compact = false, mediaStream = null, videoMuted = false }) {
@@ -210,6 +210,24 @@ function MessageBubble({ message }) {
       <p>{message.text}</p>
     </div>
   );
+}
+
+function RemoteAudio({ stream }) {
+  const audioRef = useRef(null);
+
+  useEffect(() => {
+    if (!audioRef.current) return;
+    audioRef.current.srcObject = stream || null;
+    if (stream) {
+      const playPromise = audioRef.current.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(() => {});
+      }
+    }
+  }, [stream]);
+
+  if (!stream || stream.getAudioTracks().length === 0) return null;
+  return <audio ref={audioRef} autoPlay playsInline />;
 }
 
 function InviteModal({
@@ -403,6 +421,9 @@ function MeetingScreen({
   const extraParticipants = hasRemoteParticipants ? otherParticipants.slice(1) : [];
   const streamForParticipant = (participant) =>
     participant.participantId === selfParticipantId ? localStream : participantStreams[participant.participantId] || null;
+  const remoteAudioStreams = Object.entries(participantStreams)
+    .filter(([participantId, stream]) => participantId !== selfParticipantId && stream.getAudioTracks().length > 0)
+    .map(([participantId, stream]) => ({ participantId, stream }));
 
   return (
     <div className="meeting-shell">
@@ -553,6 +574,9 @@ function MeetingScreen({
           </div>
         </section>
       </main>
+      {remoteAudioStreams.map(({ participantId, stream }) => (
+        <RemoteAudio key={participantId} stream={stream} />
+      ))}
     </div>
   );
 }
