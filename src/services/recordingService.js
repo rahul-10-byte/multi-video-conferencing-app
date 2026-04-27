@@ -270,7 +270,8 @@ class RecordingService {
     const args = [
       "-loglevel", "warning",
       "-protocol_whitelist", "file,udp,rtp",
-      "-fflags", "+genpts",
+      "-fflags", "+genpts+discardcorrupt",
+      "-use_wallclock_as_timestamps", "1",
       "-analyzeduration", "10000000",
       "-probesize", "50000000",
       "-max_delay", "20000000",
@@ -280,6 +281,19 @@ class RecordingService {
     const videoCount = taps.filter((t) => t.kind === "video").length;
     const audioCount = taps.filter((t) => t.kind === "audio").length;
     const filters = [];
+
+    // For the common 1:1 session recording, keep RTP packets as-is.
+    // This avoids decode/re-encode stalls and preserves call timing better.
+    if (videoCount <= 1 && audioCount <= 1) {
+      if (videoCount > 0) {
+        args.push("-map", "0:v:0", "-c:v", "copy");
+      }
+      if (audioCount > 0) {
+        args.push("-map", "0:a:0", "-c:a", "copy");
+      }
+      args.push("-f", "webm", outputFile);
+      return args;
+    }
 
     if (videoCount > 0) {
       if (videoCount === 1) {
@@ -318,7 +332,7 @@ class RecordingService {
     if (audioCount > 0) {
       args.push("-map", "[aout]", "-c:a", "libopus", "-b:a", "128k");
     }
-    args.push("-shortest", "-f", "webm", outputFile);
+    args.push("-f", "webm", outputFile);
     return args;
   }
 
