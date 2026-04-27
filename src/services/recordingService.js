@@ -47,6 +47,123 @@ class RecordingService {
     return engine === "gstreamer" ? "gstreamer" : "ffmpeg";
   }
 
+  getRecordingMode() {
+    const mode = String(this.config.mode || "segment_merge").toLowerCase();
+    return mode === "live_compose" ? "live_compose" : "segment_merge";
+  }
+
+  async startLiveComposeRecording({
+    sessionId,
+    initiatedBy,
+    mediaRefs,
+    recordingId,
+    outputDir,
+    outputFile,
+    mediasoupService,
+    nextPortStart
+  }) {
+    const taps = [];
+    let nextPort = nextPortStart;
+    for (const ref of mediaRefs) {
+      const transport = await mediasoupService.createPlainTransport(sessionId, { rtcpMux: false, comedia: false });
+      const rtpPort = nextPort;
+      nextPort += 2;
+      const rtcpPort = rtpPort + 1;
+      await transport.connect({ ip: this.config.hostIp || "127.0.0.1", port: rtpPort, rtcpPort });
+      const room = mediasoupService.getRoom(sessionId);
+      const consumer = await transport.consume({
+        producerId: ref.producerId,
+        rtpCapabilities: room.router.rtpCapabilities,
+        paused: true
+      });
+      if (ref.kind === "video" && typeof consumer.setPreferredLayers === "function") {
+        try {
+          await consumer.setPreferredLayers({ spatialLayer: 0, temporalLayer: 2 });
+        } catch (_err) {}
+      }
+      taps.push({
+        kind: ref.kind,
+        participantId: ref.participantId,
+        producerId: ref.producerId,
+        producer: ref.producer,
+        transport,
+        consumer,
+        rtpPort,
+        rtcpPort
+      });
+    }
+
+    const sdpFile = path.join(outputDir, `${recordingId}.sdp`);
+    await fsp.writeFile(sdpFile, this.buildSdp(taps), "utf8");
+    const engine = this.getSegmentRecordingEngine();
+    const processBinary = engine === "gstreamer" ? (this.config.gstreamerPath || "gst-launch-1.0") : (this.config.ffmpegPath || "ffmpeg");
+    const processArgs =
+      engine === "gstreamer"
+        ? this.buildLiveComposeGstreamerArgs(taps, sdpFile, outputFile)
+        : this.buildFfmpegArgs(taps, sdpFile, outputFile);
+    const { proc, getStderrTail } = this.createProcess(processBinary, processArgs);
+
+    setTimeout(async () => {
+      for (const tap of taps) {
+        try {
+          await tap.consumer.resume();
+        } catch (_err) {}
+      }
+    }, this.config.keyframeWarmupMs || 1500);
+
+    const keyframeIntervalMs = this.config.keyframeIntervalMs || 3000;
+    const keyframeTimer = setInterval(async () => {
+      for (const tap of taps) {
+        if (tap.kind !== "video") continue;
+        try {
+          if (tap.consumer && typeof tap.consumer.requestKeyFrame === "function") {
+            await tap.consumer.requestKeyFrame();
+            continue;
+          }
+        } catch (_err) {}
+        if (tap.producer && typeof tap.producer.requestKeyFrame === "function") {
+          try {
+            await tap.producer.requestKeyFrame();
+          } catch (_err) {}
+        }
+      }
+    }, keyframeIntervalMs);
+
+    const recording = {
+      recordingId,
+      sessionId,
+      engine,
+      mode: "live_compose",
+      state: "recording",
+      storageUri: outputFile,
+      startedAt: new Date().toISOString(),
+      stoppedAt: null,
+      durationMs: null,
+      sizeBytes: null,
+      initiatedBy,
+      ffmpegStderrTail: "",
+      tapCount: taps.length,
+      audioTapCount: taps.filter((t) => t.kind === "audio").length,
+      videoTapCount: taps.filter((t) => t.kind === "video").length,
+      _liveCompose: true,
+      _liveProc: proc,
+      _liveTaps: taps,
+      _liveSdpFile: sdpFile,
+      _liveGetStderrTail: getStderrTail,
+      _keyframeTimer: keyframeTimer,
+      _stopping: false
+    };
+
+    proc.on("exit", (code) => {
+      if (!recording._stopping && code !== 0 && code !== null) {
+        // eslint-disable-next-line no-console
+        console.error(`recording_live_compose_exit_nonzero session=${sessionId} code=${code} detail=${getStderrTail()}`);
+      }
+    });
+
+    return recording;
+  }
+
   async start(sessionId, initiatedBy, mediasoupService) {
     if (this.activeBySession.has(sessionId)) {
       return { ok: false, reason: "recording_already_active" };
@@ -69,6 +186,26 @@ class RecordingService {
     const segmentRecorders = [];
     let nextPort = this.config.basePort || 50040;
     if (nextPort % 2 !== 0) nextPort += 1;
+
+    if (this.getRecordingMode() === "live_compose") {
+      try {
+        const sortedRefs = mediaRefs.slice().sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "video" ? -1 : 1));
+        const liveRecording = await this.startLiveComposeRecording({
+          sessionId,
+          initiatedBy,
+          mediaRefs: sortedRefs,
+          recordingId,
+          outputDir,
+          outputFile,
+          mediasoupService,
+          nextPortStart: nextPort
+        });
+        this.activeBySession.set(sessionId, liveRecording);
+        return { ok: true, recording: this.toPublic(liveRecording) };
+      } catch (error) {
+        return { ok: false, reason: "recording_start_failed", detail: error.message };
+      }
+    }
 
     try {
       for (const participantId of participantIds) {
@@ -222,6 +359,43 @@ class RecordingService {
 
     if (active._keyframeTimer) {
       clearInterval(active._keyframeTimer);
+    }
+
+    if (active._liveCompose) {
+      try {
+        await this.stopFfmpeg(active._liveProc);
+      } catch (_e) {}
+      for (const tap of active._liveTaps || []) {
+        try { tap.consumer.close(); } catch (_e) {}
+        try { tap.transport.close(); } catch (_e) {}
+      }
+      try {
+        if (active._liveSdpFile) await fsp.unlink(active._liveSdpFile);
+      } catch (_e) {}
+      let sizeBytes = null;
+      try {
+        const stat = await fsp.stat(active.storageUri);
+        sizeBytes = stat.size;
+      } catch (_err) {}
+      const finished = {
+        ...active,
+        state: "stopped",
+        stoppedAt,
+        durationMs,
+        stoppedBy,
+        sizeBytes,
+        ffmpegStderrTail: typeof active._liveGetStderrTail === "function" ? active._liveGetStderrTail() : ""
+      };
+      delete finished._liveProc;
+      delete finished._liveTaps;
+      delete finished._liveSdpFile;
+      delete finished._liveGetStderrTail;
+      delete finished._keyframeTimer;
+      this.activeBySession.delete(sessionId);
+      const existing = this.historyBySession.get(sessionId) || [];
+      existing.push(finished);
+      this.historyBySession.set(sessionId, existing);
+      return { ok: true, recording: this.toPublic(finished) };
     }
 
     const segments = active._segments || [];
@@ -495,6 +669,69 @@ class RecordingService {
       "filesink",
       `location=${outputFile}`
     ];
+  }
+
+  buildLiveComposeGstreamerArgs(taps, sdpFile, outputFile) {
+    const normalizedSdpFile = String(sdpFile).replace(/\\/g, "/");
+    const videoCount = Math.min(taps.filter((t) => t.kind === "video").length, 4);
+    const audioCount = Math.min(taps.filter((t) => t.kind === "audio").length, 6);
+    const args = ["-e", "filesrc", `location=${normalizedSdpFile}`, "!", "sdpdemux", "name=demux"];
+
+    if (videoCount <= 1) {
+      args.push(
+        "compositor", "name=comp", "background=black",
+        "!", "videoconvert",
+        "!", "vp8enc", "deadline=1", "target-bitrate=2500000",
+        "!", "queue",
+        "!", "mux.",
+        "demux.", "!", "application/x-rtp,media=video", "!", "rtpvp8depay", "!", "vp8dec", "!", "videoconvert", "!", "videoscale",
+        "!", "video/x-raw,width=1280,height=720,framerate=30/1", "!", "queue", "!", "comp."
+      );
+    } else if (videoCount === 2) {
+      args.push(
+        "compositor", "name=comp", "background=black", "sink_0::xpos=0", "sink_1::xpos=640",
+        "!", "videoconvert",
+        "!", "video/x-raw,width=1280,height=720,framerate=30/1",
+        "!", "vp8enc", "deadline=1", "target-bitrate=2800000",
+        "!", "queue",
+        "!", "mux.",
+        "demux.", "!", "application/x-rtp,media=video", "!", "rtpvp8depay", "!", "vp8dec", "!", "videoconvert", "!", "videoscale",
+        "!", "video/x-raw,width=640,height=720,framerate=30/1", "!", "queue", "!", "comp.sink_0",
+        "demux.", "!", "application/x-rtp,media=video", "!", "rtpvp8depay", "!", "vp8dec", "!", "videoconvert", "!", "videoscale",
+        "!", "video/x-raw,width=640,height=720,framerate=30/1", "!", "queue", "!", "comp.sink_1"
+      );
+    } else {
+      args.push(
+        "compositor", "name=comp", "background=black",
+        "sink_0::xpos=0", "sink_0::ypos=0",
+        "sink_1::xpos=640", "sink_1::ypos=0",
+        "sink_2::xpos=0", "sink_2::ypos=360",
+        "sink_3::xpos=640", "sink_3::ypos=360",
+        "!", "videoconvert",
+        "!", "video/x-raw,width=1280,height=720,framerate=30/1",
+        "!", "vp8enc", "deadline=1", "target-bitrate=3000000",
+        "!", "queue",
+        "!", "mux."
+      );
+      for (let i = 0; i < videoCount; i += 1) {
+        args.push(
+          "demux.", "!", "application/x-rtp,media=video", "!", "rtpvp8depay", "!", "vp8dec", "!", "videoconvert", "!", "videoscale",
+          "!", "video/x-raw,width=640,height=360,framerate=30/1", "!", "queue", "!", `comp.sink_${i}`
+        );
+      }
+    }
+
+    if (audioCount > 0) {
+      args.push("audiomixer", "name=amix", "!", "audioconvert", "!", "audioresample", "!", "opusenc", "bitrate=128000", "!", "queue", "!", "mux.");
+      for (let i = 0; i < audioCount; i += 1) {
+        args.push(
+          "demux.", "!", "application/x-rtp,media=audio", "!", "rtpopusdepay", "!", "opusdec", "!", "audioconvert", "!", "audioresample", "!", "queue", "!", "amix."
+        );
+      }
+    }
+
+    args.push("webmmux", "name=mux", "streamable=true", "!", "filesink", `location=${outputFile}`);
+    return args;
   }
 
   buildMergeArgs(inputFiles, outputFile) {
