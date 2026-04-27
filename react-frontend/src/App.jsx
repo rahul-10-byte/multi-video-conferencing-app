@@ -154,6 +154,16 @@ function IconLeave() {
   );
 }
 
+function IconInfo() {
+  return (
+    <SvgIcon>
+      <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M12 11v5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <circle cx="12" cy="8" r="1" fill="currentColor" />
+    </SvgIcon>
+  );
+}
+
 function hasLiveVideoTrack(stream) {
   if (!stream) return false;
   return stream.getVideoTracks().some((track) => track.readyState === 'live');
@@ -163,15 +173,29 @@ function VideoFrame({ stream, hidden = false }) {
   const videoRef = useRef(null);
 
   useEffect(() => {
-    if (!videoRef.current) return;
-    videoRef.current.srcObject = stream || null;
-    if (stream) {
-      const playPromise = videoRef.current.play();
+    if (!videoRef.current) return undefined;
+    const element = videoRef.current;
+    element.srcObject = stream || null;
+
+    if (!stream) return undefined;
+
+    const tryPlay = () => {
+      const playPromise = element.play();
       if (playPromise && typeof playPromise.catch === 'function') {
         playPromise.catch(() => {});
       }
+    };
+
+    if (element.readyState >= 1) {
+      tryPlay();
+    } else {
+      element.onloadedmetadata = tryPlay;
     }
-  }, [stream]);
+
+    return () => {
+      element.onloadedmetadata = null;
+    };
+  }, [stream, hidden]);
 
   if (!stream || hidden || !hasLiveVideoTrack(stream)) return null;
 
@@ -187,13 +211,13 @@ function ParticipantTile({ participant, compact = false, mediaStream = null, vid
         <div className="video-tile__rings" />
         <div className="video-tile__glow" />
         <VideoFrame stream={mediaStream} hidden={videoMuted} />
+        <div className="video-tile__label">
+          {participant.displayName || participant.participantId || 'Guest'}
+          {presenceState ? <span className="video-tile__state"> {presenceState}</span> : null}
+        </div>
         {!showVideo ? (
           <div className="video-tile__avatar">{initialsFromName(participant.displayName || participant.participantId)}</div>
         ) : null}
-      </div>
-      <div className="video-tile__label">
-        {participant.displayName || participant.participantId || 'Guest'}
-        {presenceState ? <span className="video-tile__state"> {presenceState}</span> : null}
       </div>
     </article>
   );
@@ -392,6 +416,7 @@ function MeetingScreen({
   roomName,
   sessionInfo,
   connectionState,
+  joinError,
   reconnecting,
   messages,
   chatDraft,
@@ -405,6 +430,7 @@ function MeetingScreen({
   videoMuted,
   cameraFacing,
   recordingActive,
+  recordingBusy,
   onToggleAudio,
   onToggleVideo,
   onSwitchCamera,
@@ -425,23 +451,11 @@ function MeetingScreen({
     .filter(([participantId, stream]) => participantId !== selfParticipantId && stream.getAudioTracks().length > 0)
     .map(([participantId, stream]) => ({ participantId, stream }));
 
+  const showErrorStatus = !reconnecting && Boolean(joinError || /error|failed|disconnect/i.test(connectionState));
+  const errorText = joinError || connectionState || 'Connection error';
+
   return (
     <div className="meeting-shell">
-      <header className="meeting-topbar">
-        <div>
-          <p className="eyebrow">Meeting</p>
-          <h1>{sessionInfo?.roomName || roomName}</h1>
-        </div>
-
-        <div className="meeting-topbar__actions">
-          {reconnecting ? <span className="reconnect-banner">Reconnecting...</span> : null}
-          <span className="status-pill status-pill--soft">{connectionState}</span>
-          <button type="button" className="ghost-button" onClick={onOpenInvite}>
-            Invite customer
-          </button>
-        </div>
-      </header>
-
       <main className={`meeting-grid ${mobileChatOpen ? 'meeting-grid--chat-open' : ''}`}>
         <aside className="chat-panel">
           <div className="panel-heading">
@@ -499,77 +513,93 @@ function MeetingScreen({
             ) : null}
           </div>
 
-          <div className="control-dock" aria-label="Meeting controls">
-            <button
-              type="button"
-              className={`control-button ${audioMuted ? 'control-button--active' : ''}`}
-              onClick={onToggleAudio}
-              disabled={reconnecting}
-              aria-label={audioMuted ? 'Unmute audio' : 'Mute audio'}
-              title={audioMuted ? 'Unmute audio' : 'Mute audio'}
-              data-tooltip={audioMuted ? 'Unmute audio' : 'Mute audio'}
-            >
-              <IconMic muted={audioMuted} />
-            </button>
+          <div className="meeting-footer">
+            <div className="meeting-footer__status">
+              {reconnecting ? <span className="reconnect-banner">Reconnecting...</span> : null}
+              {showErrorStatus ? <span className="reconnect-banner reconnect-banner--error">{errorText}</span> : null}
+            </div>
+            <div className="control-dock" aria-label="Meeting controls">
+              <button
+                type="button"
+                className={`control-button ${audioMuted ? 'control-button--active' : ''}`}
+                onClick={onToggleAudio}
+                disabled={reconnecting}
+                aria-label={audioMuted ? 'Unmute audio' : 'Mute audio'}
+                title={audioMuted ? 'Unmute audio' : 'Mute audio'}
+                data-tooltip={audioMuted ? 'Unmute audio' : 'Mute audio'}
+              >
+                <IconMic muted={audioMuted} />
+              </button>
 
-            <button
-              type="button"
-              className={`control-button ${videoMuted ? 'control-button--active' : ''}`}
-              onClick={onToggleVideo}
-              disabled={reconnecting}
-              aria-label={videoMuted ? 'Turn video on' : 'Turn video off'}
-              title={videoMuted ? 'Turn video on' : 'Turn video off'}
-              data-tooltip={videoMuted ? 'Turn video on' : 'Turn video off'}
-            >
-              <IconVideo muted={videoMuted} />
-            </button>
+              <button
+                type="button"
+                className={`control-button ${videoMuted ? 'control-button--active' : ''}`}
+                onClick={onToggleVideo}
+                disabled={reconnecting}
+                aria-label={videoMuted ? 'Turn video on' : 'Turn video off'}
+                title={videoMuted ? 'Turn video on' : 'Turn video off'}
+                data-tooltip={videoMuted ? 'Turn video on' : 'Turn video off'}
+              >
+                <IconVideo muted={videoMuted} />
+              </button>
 
-            <button
-              type="button"
-              className="control-button"
-              onClick={onSwitchCamera}
-              disabled={reconnecting}
-              aria-label={`Switch camera (${cameraFacing})`}
-              title={`Switch camera (${cameraFacing})`}
-              data-tooltip={`Switch camera (${cameraFacing})`}
-            >
-              <IconSwitchCamera />
-            </button>
+              <button
+                type="button"
+                className="control-button"
+                onClick={onSwitchCamera}
+                disabled={reconnecting}
+                aria-label={`Switch camera (${cameraFacing})`}
+                title={`Switch camera (${cameraFacing})`}
+                data-tooltip={`Switch camera (${cameraFacing})`}
+              >
+                <IconSwitchCamera />
+              </button>
 
-            <button
-              type="button"
-              className={`control-button ${recordingActive ? 'control-button--active' : ''}`}
-              onClick={onToggleRecording}
-              disabled={reconnecting}
-              aria-label={recordingActive ? 'Stop recording' : 'Start recording'}
-              title={recordingActive ? 'Stop recording' : 'Start recording'}
-              data-tooltip={recordingActive ? 'Stop recording' : 'Start recording'}
-            >
-              <IconRecord active={recordingActive} />
-            </button>
+              <button
+                type="button"
+                className={`control-button ${recordingActive ? 'control-button--active' : ''}`}
+                onClick={onToggleRecording}
+                disabled={reconnecting || recordingBusy}
+                aria-label={recordingActive ? 'Stop recording' : 'Start recording'}
+                title={recordingActive ? 'Stop recording' : 'Start recording'}
+                data-tooltip={recordingActive ? 'Stop recording' : 'Start recording'}
+              >
+                <IconRecord active={recordingActive} />
+              </button>
 
-            <button
-              type="button"
-              className={`control-button control-button--chat ${mobileChatOpen ? 'control-button--active' : ''}`}
-              onClick={onToggleMobileChat}
-              disabled={reconnecting}
-              aria-label={mobileChatOpen ? 'Hide chat' : 'Show chat'}
-              title={mobileChatOpen ? 'Hide chat' : 'Show chat'}
-              data-tooltip={mobileChatOpen ? 'Hide chat' : 'Show chat'}
-            >
-              <IconChat />
-            </button>
+              <button
+                type="button"
+                className={`control-button control-button--chat ${mobileChatOpen ? 'control-button--active' : ''}`}
+                onClick={onToggleMobileChat}
+                disabled={reconnecting}
+                aria-label={mobileChatOpen ? 'Hide chat' : 'Show chat'}
+                title={mobileChatOpen ? 'Hide chat' : 'Show chat'}
+                data-tooltip={mobileChatOpen ? 'Hide chat' : 'Show chat'}
+              >
+                <IconChat />
+              </button>
 
+              <button
+                type="button"
+                className="control-button control-button--leave"
+                onClick={onLeave}
+                disabled={reconnecting}
+                aria-label="Leave meeting"
+                title="Leave meeting"
+                data-tooltip="Leave meeting"
+              >
+                <IconLeave />
+              </button>
+            </div>
             <button
               type="button"
-              className="control-button control-button--leave"
-              onClick={onLeave}
-              disabled={reconnecting}
-              aria-label="Leave meeting"
-              title="Leave meeting"
-              data-tooltip="Leave meeting"
+              className="control-button control-button--info"
+              onClick={onOpenInvite}
+              aria-label={`Meeting info for ${sessionInfo?.roomName || roomName}`}
+              title={`Meeting info for ${sessionInfo?.roomName || roomName}`}
+              data-tooltip="Meeting info"
             >
-              <IconLeave />
+              <IconInfo />
             </button>
           </div>
         </section>
@@ -602,6 +632,7 @@ export default function App() {
   const [videoMuted, setVideoMuted] = useState(false);
   const [cameraFacing, setCameraFacing] = useState('front');
   const [recordingActive, setRecordingActive] = useState(false);
+  const [recordingBusy, setRecordingBusy] = useState(false);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteCustomerId, setInviteCustomerId] = useState('customer-1');
@@ -1215,11 +1246,15 @@ export default function App() {
       if (!videoTrack) {
         throw new Error('video_track_missing');
       }
+      videoTrack.enabled = true;
       currentStream.getVideoTracks().forEach((track) => {
         currentStream.removeTrack(track);
         track.stop();
       });
       currentStream.addTrack(videoTrack);
+      // Refresh local preview immediately so camera on/off feels responsive.
+      updateLocalStream(new MediaStream(currentStream.getTracks()));
+      setVideoMuted(false);
       if (sendTransportRef.current) {
         videoProducerRef.current = await sendTransportRef.current.produce({
           track: videoTrack,
@@ -1230,9 +1265,7 @@ export default function App() {
           ],
         });
       }
-      updateLocalStream(new MediaStream(currentStream.getTracks()));
       await refreshVideoDevices(currentStream).catch(() => {});
-      setVideoMuted(false);
       await socketRef.current.request('deviceChanged', {
         device: 'video:on',
       });
@@ -1291,25 +1324,32 @@ export default function App() {
   }
 
   async function toggleRecording() {
-    if (!sessionInfo?.sessionId) return;
+    if (!sessionInfo?.sessionId || recordingBusy) return;
+    const wantsStart = !recordingActive;
+    const initiatedBy = sessionInfo.participantId || activeParticipantId;
+    setRecordingBusy(true);
     try {
-      if (!recordingActive) {
+      if (wantsStart) {
         const response = await requestJson(backendUrl, `/v1/sessions/${sessionInfo.sessionId}/recording/start`, {
           method: 'POST',
-          body: { initiatedBy: sessionInfo.participantId || activeParticipantId },
+          body: { initiatedBy },
           apiKey,
         });
-        setRecordingActive(response.recording?.state === 'recording');
+        const nextState = response?.recording?.state || response?.recording?.status || response?.state || 'recording';
+        setRecordingActive(nextState === 'recording');
       } else {
         const response = await requestJson(backendUrl, `/v1/sessions/${sessionInfo.sessionId}/recording/stop`, {
           method: 'POST',
-          body: { stoppedBy: sessionInfo.participantId || activeParticipantId },
+          body: { stoppedBy: initiatedBy },
           apiKey,
         });
-        setRecordingActive(response.recording?.state === 'recording');
+        const nextState = response?.recording?.state || response?.recording?.status || response?.state || 'stopped';
+        setRecordingActive(nextState === 'recording');
       }
     } catch (error) {
       setJoinError(error.message || 'recording_failed');
+    } finally {
+      setRecordingBusy(false);
     }
   }
 
@@ -1432,6 +1472,7 @@ export default function App() {
         roomName={roomName}
         sessionInfo={sessionInfo}
         connectionState={connectionState}
+        joinError={joinError}
         reconnecting={connectionState.startsWith('Reconnecting')}
         connected={connected}
         messages={messages}
@@ -1446,6 +1487,7 @@ export default function App() {
         videoMuted={videoMuted}
         cameraFacing={cameraFacing}
         recordingActive={recordingActive}
+        recordingBusy={recordingBusy}
         onToggleAudio={() => void toggleAudio()}
         onToggleVideo={() => void toggleVideo()}
         onSwitchCamera={() => void switchCamera()}
