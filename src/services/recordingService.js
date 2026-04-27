@@ -21,15 +21,30 @@ class RecordingService {
   }
 
   async stopFfmpeg(ffmpeg, timeoutMs = 4000) {
-    if (!ffmpeg || ffmpeg.killed) return;
+    if (!ffmpeg || ffmpeg.exitCode !== null || ffmpeg.signalCode) return true;
     ffmpeg.kill("SIGINT");
-    await new Promise((resolve) => {
-      const timer = setTimeout(resolve, timeoutMs);
+    const exitedAfterSigint = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), timeoutMs);
       ffmpeg.once("exit", () => {
         clearTimeout(timer);
-        resolve();
+        resolve(true);
       });
     });
+    if (exitedAfterSigint) return true;
+
+    ffmpeg.kill("SIGTERM");
+    const exitedAfterSigterm = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), 1500);
+      ffmpeg.once("exit", () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+    if (exitedAfterSigterm) return true;
+
+    ffmpeg.kill("SIGKILL");
+    await new Promise((resolve) => ffmpeg.once("exit", () => resolve()));
+    return true;
   }
 
   async waitProcessExit(ffmpeg, timeoutMs = 30000) {
@@ -743,15 +758,15 @@ class RecordingService {
     const audioCount = inputFiles.length;
     const filters = [];
     if (videoCount === 1) {
-      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,tpad=stop_mode=clone:stop_duration=36000[vout]");
+      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
     } else if (videoCount === 2) {
-      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo,tpad=stop_mode=clone:stop_duration=36000[v0]");
-      filters.push("[1:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo,tpad=stop_mode=clone:stop_duration=36000[v1]");
+      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v0]");
+      filters.push("[1:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v1]");
       filters.push("[v0][v1]hstack=inputs=2:shortest=0[vout]");
     } else {
       const capped = Math.min(videoCount, 4);
       for (let i = 0; i < capped; i += 1) {
-        filters.push(`[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fifo,tpad=stop_mode=clone:stop_duration=36000[v${i}]`);
+        filters.push(`[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fifo[v${i}]`);
       }
       const joined = Array.from({ length: Math.min(videoCount, 4) }, (_v, i) => `[v${i}]`).join("");
       const layout = videoCount === 3 ? "0_0|640_0|0_360" : "0_0|640_0|0_360|640_360";
