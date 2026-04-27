@@ -679,7 +679,6 @@ class RecordingService {
       "mux.",
       "webmmux",
       "name=mux",
-      "streamable=true",
       "!",
       "filesink",
       `location=${outputFile}`
@@ -745,7 +744,7 @@ class RecordingService {
       }
     }
 
-    args.push("webmmux", "name=mux", "streamable=true", "!", "filesink", `location=${outputFile}`);
+    args.push("webmmux", "name=mux", "!", "filesink", `location=${outputFile}`);
     return args;
   }
 
