@@ -299,17 +299,15 @@ class RecordingService {
       if (videoCount === 1) {
         filters.push("[0:v:0]setpts=PTS-STARTPTS,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
       } else if (videoCount === 2) {
-        filters.push("[0:v:0]setpts=PTS-STARTPTS,format=yuv420p,scale=640:720[v0]");
-        filters.push("[0:v:1]setpts=PTS-STARTPTS,format=yuv420p,scale=640:720[v1]");
+        // Normalize timestamps/cadence per input before stacking to keep
+        // two-party recordings stable over longer sessions.
+        filters.push("[0:v:0]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v0]");
+        filters.push("[0:v:1]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v1]");
         filters.push("[v0][v1]hstack=inputs=2[vout]");
       } else {
-        const capped = Math.min(videoCount, 4);
-        for (let i = 0; i < capped; i += 1) {
-          filters.push(`[0:v:${i}]setpts=PTS-STARTPTS,format=yuv420p,scale=640:360[v${i}]`);
-        }
-        const joined = Array.from({ length: capped }, (_v, i) => `[v${i}]`).join("");
-        const layout = capped === 3 ? "0_0|640_0|0_360" : "0_0|640_0|0_360|640_360";
-        filters.push(`${joined}xstack=inputs=${capped}:layout=${layout}[vout]`);
+        // For >2 videos, prefer a stable representative feed over fragile
+        // large mosaics in the current recorder path.
+        filters.push("[0:v:0]setpts=PTS-STARTPTS,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
       }
     }
 
