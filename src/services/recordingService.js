@@ -47,10 +47,18 @@ class RecordingService {
         rtpCapabilities: room.router.rtpCapabilities,
         paused: true
       });
+      if (ref.kind === "video" && typeof consumer.setPreferredLayers === "function") {
+        try {
+          // Lock recorder to a stable simulcast layer to avoid freezes caused by
+          // layer switching behavior on plain transports.
+          await consumer.setPreferredLayers({ spatialLayer: 0, temporalLayer: 2 });
+        } catch (_err) {}
+      }
       taps.push({
         kind: ref.kind,
         participantId: ref.participantId,
         producerId: ref.producerId,
+        producer: ref.producer,
         transport,
         consumer,
         rtpPort
@@ -97,6 +105,17 @@ class RecordingService {
       const keyframeTimer = setInterval(async () => {
         for (const tap of taps) {
           if (tap.kind !== "video") continue;
+          if (tap.consumer && typeof tap.consumer.setPreferredLayers === "function") {
+            try {
+              await tap.consumer.setPreferredLayers({ spatialLayer: 0, temporalLayer: 2 });
+            } catch (_err) {}
+          }
+          try {
+            if (tap.consumer && typeof tap.consumer.requestKeyFrame === "function") {
+              await tap.consumer.requestKeyFrame();
+              continue;
+            }
+          } catch (_err) {}
           if (tap.producer && typeof tap.producer.requestKeyFrame === "function") {
             try {
               await tap.producer.requestKeyFrame();
