@@ -37,10 +37,12 @@ class RecordingService {
 
     const addTap = async (ref) => {
       if (!ref) return;
-      const transport = await mediasoupService.createPlainTransport(sessionId);
+      // FFmpeg RTP ingest is more reliable with explicit RTCP ports.
+      const transport = await mediasoupService.createPlainTransport(sessionId, { rtcpMux: false, comedia: false });
       const rtpPort = nextPort;
       nextPort += 2;
-      await transport.connect({ ip: this.config.hostIp || "127.0.0.1", port: rtpPort });
+      const rtcpPort = rtpPort + 1;
+      await transport.connect({ ip: this.config.hostIp || "127.0.0.1", port: rtpPort, rtcpPort });
       const room = mediasoupService.getRoom(sessionId);
       const consumer = await transport.consume({
         producerId: ref.producerId,
@@ -61,7 +63,8 @@ class RecordingService {
         producer: ref.producer,
         transport,
         consumer,
-        rtpPort
+        rtpPort,
+        rtcpPort
       });
       if (ref.kind === "video" && ref.producer && typeof ref.producer.requestKeyFrame === "function") {
         try {
@@ -245,6 +248,9 @@ class RecordingService {
       const channels = codec.channels ? `/${codec.channels}` : "";
       const encoding = tap.consumer?.rtpParameters?.encodings?.[0];
       lines.push(`m=${tap.kind} ${tap.rtpPort} RTP/AVP ${payloadType}`);
+      if (tap.rtcpPort) {
+        lines.push(`a=rtcp:${tap.rtcpPort} IN IP4 127.0.0.1`);
+      }
       lines.push("a=recvonly");
       lines.push(`a=rtpmap:${payloadType} ${codecName}/${codec.clockRate}${channels}`);
       if (codec.parameters && Object.keys(codec.parameters).length > 0) {

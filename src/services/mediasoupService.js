@@ -258,13 +258,13 @@ class MediasoupService {
     return refs;
   }
 
-  async createPlainTransport(sessionId) {
+  async createPlainTransport(sessionId, options = {}) {
     const room = this.getRoom(sessionId);
     if (!room) throw new Error("session_not_found");
     const transport = await room.router.createPlainTransport({
       listenIp: { ip: this.config.listenIp, announcedIp: this.config.announcedAddress || undefined },
-      rtcpMux: true,
-      comedia: false
+      rtcpMux: options.rtcpMux !== undefined ? Boolean(options.rtcpMux) : true,
+      comedia: options.comedia !== undefined ? Boolean(options.comedia) : false
     });
     return transport;
   }
