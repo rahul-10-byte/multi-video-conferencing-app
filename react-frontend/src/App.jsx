@@ -164,6 +164,16 @@ function IconInfo() {
   );
 }
 
+function IconMore() {
+  return (
+    <SvgIcon>
+      <circle cx="6" cy="12" r="1.8" fill="currentColor" />
+      <circle cx="12" cy="12" r="1.8" fill="currentColor" />
+      <circle cx="18" cy="12" r="1.8" fill="currentColor" />
+    </SvgIcon>
+  );
+}
+
 function hasLiveVideoTrack(stream) {
   if (!stream) return false;
   return stream.getVideoTracks().some((track) => track.readyState === 'live');
@@ -202,7 +212,7 @@ function VideoFrame({ stream, hidden = false }) {
   return <video ref={videoRef} className="video-tile__media" autoPlay playsInline muted />;
 }
 
-function ParticipantTile({ participant, compact = false, mediaStream = null, videoMuted = false }) {
+function ParticipantTile({ participant, compact = false, mediaStream = null, videoMuted = false, diagnosticsText = '' }) {
   const presenceState = participant.state === 'reconnecting' ? 'Reconnecting...' : null;
   const showVideo = Boolean(mediaStream) && !videoMuted && hasLiveVideoTrack(mediaStream);
   return (
@@ -215,6 +225,7 @@ function ParticipantTile({ participant, compact = false, mediaStream = null, vid
           {participant.displayName || participant.participantId || 'Guest'}
           {presenceState ? <span className="video-tile__state"> {presenceState}</span> : null}
         </div>
+        {diagnosticsText ? <div className="video-tile__metrics">{diagnosticsText}</div> : null}
         {!showVideo ? (
           <div className="video-tile__avatar">{initialsFromName(participant.displayName || participant.participantId)}</div>
         ) : null}
@@ -426,6 +437,7 @@ function MeetingScreen({
   selfParticipant,
   localStream,
   participantStreams,
+  mediaStats,
   audioMuted,
   videoMuted,
   cameraFacing,
@@ -440,6 +452,7 @@ function MeetingScreen({
   mobileChatOpen,
   onToggleMobileChat,
 }) {
+  const [mobileControlsOpen, setMobileControlsOpen] = useState(false);
   const selfParticipantId = selfParticipant.participantId;
   const otherParticipants = participants.filter((participant) => participant.participantId !== selfParticipant.participantId);
   const hasRemoteParticipants = otherParticipants.length > 0;
@@ -453,6 +466,11 @@ function MeetingScreen({
 
   const showErrorStatus = !reconnecting && Boolean(joinError || /error|failed|disconnect/i.test(connectionState));
   const errorText = joinError || connectionState || 'Connection error';
+  const diagnosticsText = mediaStats
+    ? `Send: ${mediaStats.resolution || 'n/a'} @ ${mediaStats.fps ?? 'n/a'}fps, ${mediaStats.bitrateKbps ?? 'n/a'} kbps${
+        mediaStats.rttMs != null ? `, RTT ${mediaStats.rttMs}ms` : ''
+      }, loss ${mediaStats.lossPct ?? 'n/a'}%`
+    : '';
 
   return (
     <div className="meeting-shell">
@@ -497,10 +515,11 @@ function MeetingScreen({
                 participant={primaryParticipant}
                 mediaStream={streamForParticipant(primaryParticipant)}
                 videoMuted={primaryParticipant.participantId === selfParticipantId ? videoMuted : false}
+                diagnosticsText={primaryParticipant.participantId === selfParticipantId ? diagnosticsText : ''}
               />
               {hasRemoteParticipants ? (
                 <div className="video-layout__pip">
-                  <ParticipantTile participant={selfParticipant} compact mediaStream={localStream} videoMuted={videoMuted} />
+                  <ParticipantTile participant={selfParticipant} compact mediaStream={localStream} videoMuted={videoMuted} diagnosticsText={diagnosticsText} />
                 </div>
               ) : null}
             </div>
@@ -545,7 +564,7 @@ function MeetingScreen({
 
               <button
                 type="button"
-                className="control-button"
+                className="control-button control-button--secondary"
                 onClick={onSwitchCamera}
                 disabled={reconnecting}
                 aria-label={`Switch camera (${cameraFacing})`}
@@ -557,7 +576,7 @@ function MeetingScreen({
 
               <button
                 type="button"
-                className={`control-button ${recordingActive ? 'control-button--active' : ''}`}
+                className={`control-button control-button--secondary ${recordingActive ? 'control-button--active' : ''}`}
                 onClick={onToggleRecording}
                 disabled={reconnecting || recordingBusy}
                 aria-label={recordingActive ? 'Stop recording' : 'Start recording'}
@@ -569,7 +588,7 @@ function MeetingScreen({
 
               <button
                 type="button"
-                className={`control-button control-button--chat ${mobileChatOpen ? 'control-button--active' : ''}`}
+                className={`control-button control-button--chat control-button--secondary ${mobileChatOpen ? 'control-button--active' : ''}`}
                 onClick={onToggleMobileChat}
                 disabled={reconnecting}
                 aria-label={mobileChatOpen ? 'Hide chat' : 'Show chat'}
@@ -590,10 +609,22 @@ function MeetingScreen({
               >
                 <IconLeave />
               </button>
+
+              <button
+                type="button"
+                className={`control-button control-button--more ${mobileControlsOpen ? 'control-button--active' : ''}`}
+                onClick={() => setMobileControlsOpen((open) => !open)}
+                disabled={reconnecting}
+                aria-label={mobileControlsOpen ? 'Hide more actions' : 'Show more actions'}
+                title={mobileControlsOpen ? 'Hide more actions' : 'Show more actions'}
+                data-tooltip={mobileControlsOpen ? 'Hide more actions' : 'More actions'}
+              >
+                <IconMore />
+              </button>
             </div>
             <button
               type="button"
-              className="control-button control-button--info"
+              className="control-button control-button--info control-button--secondary"
               onClick={onOpenInvite}
               aria-label={`Meeting info for ${sessionInfo?.roomName || roomName}`}
               title={`Meeting info for ${sessionInfo?.roomName || roomName}`}
@@ -602,6 +633,22 @@ function MeetingScreen({
               <IconInfo />
             </button>
           </div>
+          {mobileControlsOpen ? (
+            <div className="mobile-controls-menu">
+              <button type="button" className="ghost-button" onClick={onSwitchCamera} disabled={reconnecting}>
+                Switch camera
+              </button>
+              <button type="button" className="ghost-button" onClick={onToggleRecording} disabled={reconnecting || recordingBusy}>
+                {recordingActive ? 'Stop recording' : 'Start recording'}
+              </button>
+              <button type="button" className="ghost-button" onClick={onToggleMobileChat} disabled={reconnecting}>
+                {mobileChatOpen ? 'Hide chat' : 'Show chat'}
+              </button>
+              <button type="button" className="ghost-button" onClick={onOpenInvite}>
+                Meeting info
+              </button>
+            </div>
+          ) : null}
         </section>
       </main>
       {remoteAudioStreams.map(({ participantId, stream }) => (
@@ -642,6 +689,7 @@ export default function App() {
   const [inviteCopied, setInviteCopied] = useState(false);
   const [localStream, setLocalStream] = useState(null);
   const [participantStreams, setParticipantStreams] = useState({});
+  const [mediaStats, setMediaStats] = useState(null);
   const [cameraIndex, setCameraIndex] = useState(0);
   const availableCamerasRef = useRef([]);
   const cameraIndexRef = useRef(0);
@@ -660,6 +708,7 @@ export default function App() {
   const intentionalLeaveRef = useRef(false);
   const connectionMetaRef = useRef(null);
   const localStreamRef = useRef(null);
+  const lastVideoOutboundRef = useRef({ bytesSent: null, timestampMs: null });
 
   function updateLocalStream(nextStream) {
     localStreamRef.current = nextStream;
@@ -709,6 +758,8 @@ export default function App() {
     audioProducerRef.current = null;
     videoProducerRef.current = null;
     deviceRef.current = null;
+    lastVideoOutboundRef.current = { bytesSent: null, timestampMs: null };
+    setMediaStats(null);
     setParticipantStreams({});
   }
 
@@ -954,6 +1005,10 @@ export default function App() {
     let inboundJitterMs = null;
     let inboundPacketLossPct = null;
     let iceConnectionState = sendTransportRef.current.connectionState || null;
+    let outboundVideoBitrateKbps = null;
+    let outboundVideoFps = null;
+    let outboundWidth = null;
+    let outboundHeight = null;
     stats.forEach((stat) => {
       if (stat.type === 'candidate-pair' && stat.state === 'succeeded' && stat.nominated) {
         if (typeof stat.currentRoundTripTime === 'number') {
@@ -969,7 +1024,46 @@ export default function App() {
           inboundPacketLossPct = Math.round((packetsLost / totalPackets) * 10000) / 100;
         }
       }
+      if (stat.type === 'outbound-rtp' && (stat.kind === 'video' || stat.mediaType === 'video')) {
+        const bytesSent = typeof stat.bytesSent === 'number' ? stat.bytesSent : null;
+        const timestampMs = typeof stat.timestamp === 'number' ? stat.timestamp : null;
+        if (bytesSent != null && timestampMs != null) {
+          const previous = lastVideoOutboundRef.current;
+          if (previous.bytesSent != null && previous.timestampMs != null && timestampMs > previous.timestampMs) {
+            const bitsDelta = (bytesSent - previous.bytesSent) * 8;
+            const secondsDelta = (timestampMs - previous.timestampMs) / 1000;
+            if (secondsDelta > 0) {
+              outboundVideoBitrateKbps = Math.max(0, Math.round(bitsDelta / secondsDelta / 1000));
+            }
+          }
+          lastVideoOutboundRef.current = { bytesSent, timestampMs };
+        }
+        if (typeof stat.framesPerSecond === 'number') {
+          outboundVideoFps = Math.round(stat.framesPerSecond);
+        }
+        if (typeof stat.frameWidth === 'number') {
+          outboundWidth = Math.round(stat.frameWidth);
+        }
+        if (typeof stat.frameHeight === 'number') {
+          outboundHeight = Math.round(stat.frameHeight);
+        }
+      }
     });
+
+    const localVideoTrack = localStreamRef.current?.getVideoTracks?.()[0] || null;
+    const localSettings = localVideoTrack?.getSettings?.() || {};
+    const finalFps = outboundVideoFps ?? (typeof localSettings.frameRate === 'number' ? Math.round(localSettings.frameRate) : null);
+    const finalWidth = outboundWidth ?? (typeof localSettings.width === 'number' ? Math.round(localSettings.width) : null);
+    const finalHeight = outboundHeight ?? (typeof localSettings.height === 'number' ? Math.round(localSettings.height) : null);
+    const resolution = finalWidth && finalHeight ? `${finalWidth}x${finalHeight}` : null;
+    setMediaStats({
+      bitrateKbps: outboundVideoBitrateKbps,
+      fps: finalFps,
+      resolution,
+      rttMs: outboundRttMs,
+      lossPct: inboundPacketLossPct,
+    });
+
     await client.request(
       'qualityReport',
       {
@@ -1281,19 +1375,8 @@ export default function App() {
       setJoinError('camera_switch_unavailable');
       return;
     }
-    const cameras = await refreshVideoDevices(currentStream).catch(() => []);
-    if (!cameras || cameras.length < 2) {
-      setJoinError('camera_switch_unavailable');
-      return;
-    }
-    const nextIndex = (cameraIndexRef.current + 1) % cameras.length;
-    const nextCamera = cameras[nextIndex];
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { deviceId: { exact: nextCamera.deviceId } },
-      });
-      const [newTrack] = stream.getVideoTracks();
+
+    const applyNewVideoTrack = async (newTrack, nextFacing = null, nextIndex = null) => {
       if (!newTrack) {
         throw new Error('camera_track_missing');
       }
@@ -1307,11 +1390,52 @@ export default function App() {
         await videoProducerRef.current.replaceTrack({ track: newTrack });
       }
       updateLocalStream(currentStream);
-      cameraIndexRef.current = nextIndex;
-      setCameraIndex(nextIndex);
-      setCameraFacing(`camera-${nextIndex + 1}`);
-    } catch (error) {
-      setJoinError(error.message || 'camera_switch_failed');
+      if (typeof nextIndex === 'number') {
+        cameraIndexRef.current = nextIndex;
+        setCameraIndex(nextIndex);
+      }
+      if (nextFacing) {
+        setCameraFacing(nextFacing);
+      }
+    };
+
+    let switched = false;
+
+    const cameras = await refreshVideoDevices(currentStream).catch(() => []);
+    if (cameras && cameras.length >= 2) {
+      const nextIndex = (cameraIndexRef.current + 1) % cameras.length;
+      const nextCamera = cameras[nextIndex];
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { deviceId: { exact: nextCamera.deviceId } },
+        });
+        const [newTrack] = stream.getVideoTracks();
+        await applyNewVideoTrack(newTrack, `camera-${nextIndex + 1}`, nextIndex);
+        switched = true;
+      } catch (_error) {
+        // Fall through to facingMode-based fallback for mobile browsers.
+      }
+    }
+
+    if (!switched) {
+      const nextFacing = cameraFacing === 'rear' ? 'front' : 'rear';
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { facingMode: nextFacing === 'rear' ? 'environment' : 'user' },
+        });
+        const [newTrack] = stream.getVideoTracks();
+        await applyNewVideoTrack(newTrack, nextFacing);
+        switched = true;
+      } catch (error) {
+        setJoinError(error.message || 'camera_switch_failed');
+        return;
+      }
+    }
+
+    if (!switched) {
+      setJoinError('camera_switch_unavailable');
       return;
     }
     try {
@@ -1483,6 +1607,7 @@ export default function App() {
         selfParticipant={selfParticipant}
         localStream={localStream}
         participantStreams={participantStreams}
+        mediaStats={mediaStats}
         audioMuted={audioMuted}
         videoMuted={videoMuted}
         cameraFacing={cameraFacing}

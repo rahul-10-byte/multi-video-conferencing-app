@@ -91,6 +91,20 @@ class RecordingService {
         }
       }, this.config.keyframeWarmupMs || 1500);
 
+      // Keep requesting keyframes periodically so recording can recover
+      // from packet loss/layer switches instead of freezing video.
+      const keyframeIntervalMs = this.config.keyframeIntervalMs || 3000;
+      const keyframeTimer = setInterval(async () => {
+        for (const tap of taps) {
+          if (tap.kind !== "video") continue;
+          if (tap.producer && typeof tap.producer.requestKeyFrame === "function") {
+            try {
+              await tap.producer.requestKeyFrame();
+            } catch (_err) {}
+          }
+        }
+      }, keyframeIntervalMs);
+
       ffmpeg.stdout.on("data", () => {});
       let stderrTail = "";
       ffmpeg.stderr.on("data", (chunk) => {
@@ -120,6 +134,7 @@ class RecordingService {
         _ffmpeg: ffmpeg,
         _sdpFile: sdpFile,
         _taps: taps,
+        _keyframeTimer: keyframeTimer,
         _stopping: false,
         _getStderrTail: () => stderrTail
       };
@@ -154,6 +169,10 @@ class RecordingService {
       });
     }
 
+    if (active._keyframeTimer) {
+      clearInterval(active._keyframeTimer);
+    }
+
     for (const tap of active._taps || []) {
       try { tap.consumer.close(); } catch (_e) {}
       try { tap.transport.close(); } catch (_e) {}
@@ -181,6 +200,7 @@ class RecordingService {
     delete finished._ffmpeg;
     delete finished._sdpFile;
     delete finished._taps;
+    delete finished._keyframeTimer;
 
     this.activeBySession.delete(sessionId);
     const existing = this.historyBySession.get(sessionId) || [];
