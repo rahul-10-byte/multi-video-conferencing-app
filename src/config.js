@@ -40,7 +40,9 @@ const config = {
   },
   recording: {
     enabled: (process.env.VC_RECORDING_ENABLED || "true").toLowerCase() === "true",
+    engine: (process.env.VC_RECORDING_ENGINE || "gstreamer").toLowerCase(),
     ffmpegPath: process.env.VC_FFMPEG_PATH || "ffmpeg",
+    gstreamerPath: process.env.VC_GSTREAMER_PATH || "gst-launch-1.0",
     outputDir: process.env.VC_RECORDING_OUTPUT_DIR || "recordings",
     hostIp: process.env.VC_RECORDING_HOST_IP || "127.0.0.1",
     basePort: intFromEnv("VC_RECORDING_BASE_PORT", 50040)

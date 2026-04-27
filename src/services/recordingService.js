@@ -10,14 +10,14 @@ class RecordingService {
     this.historyBySession = new Map();
   }
 
-  createFfmpegProcess(args) {
-    const ffmpeg = spawn(this.config.ffmpegPath || "ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+  createProcess(binary, args) {
+    const proc = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stderrTail = "";
-    ffmpeg.stdout.on("data", () => {});
-    ffmpeg.stderr.on("data", (chunk) => {
+    proc.stdout.on("data", () => {});
+    proc.stderr.on("data", (chunk) => {
       stderrTail = `${stderrTail}${chunk.toString()}`.slice(-4000);
     });
-    return { ffmpeg, getStderrTail: () => stderrTail };
+    return { proc, getStderrTail: () => stderrTail };
   }
 
   async stopFfmpeg(ffmpeg, timeoutMs = 4000) {
@@ -30,6 +30,21 @@ class RecordingService {
         resolve();
       });
     });
+  }
+
+  async waitProcessExit(ffmpeg, timeoutMs = 30000) {
+    return await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), timeoutMs);
+      ffmpeg.once("exit", (code) => {
+        clearTimeout(timer);
+        resolve(code);
+      });
+    });
+  }
+
+  getSegmentRecordingEngine() {
+    const engine = String(this.config.engine || "ffmpeg").toLowerCase();
+    return engine === "gstreamer" ? "gstreamer" : "ffmpeg";
   }
 
   async start(sessionId, initiatedBy, mediasoupService) {
@@ -96,14 +111,20 @@ class RecordingService {
         const sdpFile = path.join(outputDir, `${recordingId}_${safeParticipantId}.sdp`);
         const sdp = this.buildSdp(taps);
         await fsp.writeFile(sdpFile, sdp, "utf8");
-        const ffmpegArgs = this.buildFfmpegArgs(taps, sdpFile, segmentFile);
-        const { ffmpeg, getStderrTail } = this.createFfmpegProcess(ffmpegArgs);
+        const segmentEngine = this.getSegmentRecordingEngine();
+        const processArgs =
+          segmentEngine === "gstreamer"
+            ? this.buildSegmentGstreamerArgs(sdpFile, segmentFile)
+            : this.buildSegmentFfmpegArgs(taps, sdpFile, segmentFile);
+        const processBinary = segmentEngine === "gstreamer" ? (this.config.gstreamerPath || "gst-launch-1.0") : (this.config.ffmpegPath || "ffmpeg");
+        const { proc: ffmpeg, getStderrTail } = this.createProcess(processBinary, processArgs);
         segmentRecorders.push({
           participantId,
           outputFile: segmentFile,
           sdpFile,
           taps,
           ffmpeg,
+          engine: segmentEngine,
           getStderrTail
         });
       }
@@ -146,6 +167,7 @@ class RecordingService {
       const recording = {
         recordingId,
         sessionId,
+        engine: this.getSegmentRecordingEngine(),
         state: "recording",
         storageUri: outputFile,
         startedAt,
@@ -240,19 +262,29 @@ class RecordingService {
       const mergeCandidates = existingSegmentFiles.filter((seg) => seg.hasVideo);
       const mergeInputs = (mergeCandidates.length > 0 ? mergeCandidates : existingSegmentFiles).map((seg) => seg.outputFile);
       const mergeArgs = this.buildMergeArgs(mergeInputs, finalOutputFile);
-      const { ffmpeg: mergeFfmpeg, getStderrTail: getMergeStderrTail } = this.createFfmpegProcess(mergeArgs);
-      await new Promise((resolve) => {
-        const timer = setTimeout(resolve, 30000);
-        mergeFfmpeg.once("exit", () => {
-          clearTimeout(timer);
-          resolve();
-        });
-      });
+      const { proc: mergeFfmpeg, getStderrTail: getMergeStderrTail } = this.createProcess(this.config.ffmpegPath || "ffmpeg", mergeArgs);
+      const mergeExitCode = await this.waitProcessExit(mergeFfmpeg, 45000);
       const mergeStderrTail = getMergeStderrTail();
-      for (const seg of existingSegmentFiles) {
-        try {
-          await fsp.unlink(seg.outputFile);
-        } catch (_e) {}
+      if (mergeExitCode === 0) {
+        for (const seg of existingSegmentFiles) {
+          try {
+            await fsp.unlink(seg.outputFile);
+          } catch (_e) {}
+        }
+      } else {
+        // Fallback to the longest available segment when merge fails.
+        let longest = existingSegmentFiles[0];
+        let longestSize = -1;
+        for (const seg of existingSegmentFiles) {
+          try {
+            const stat = await fsp.stat(seg.outputFile);
+            if (stat.size > longestSize) {
+              longestSize = stat.size;
+              longest = seg;
+            }
+          } catch (_e) {}
+        }
+        finalOutputFile = longest.outputFile;
       }
       active._mergeStderrTail = mergeStderrTail;
     }
@@ -389,6 +421,82 @@ class RecordingService {
     return args;
   }
 
+  buildSegmentFfmpegArgs(taps, sdpFile, outputFile) {
+    const args = [
+      "-loglevel", "warning",
+      "-protocol_whitelist", "file,udp,rtp",
+      "-fflags", "+genpts+discardcorrupt",
+      "-use_wallclock_as_timestamps", "1",
+      "-analyzeduration", "10000000",
+      "-probesize", "50000000",
+      "-max_delay", "20000000",
+      "-f", "sdp",
+      "-i", sdpFile
+    ];
+    const hasVideo = taps.some((t) => t.kind === "video");
+    const hasAudio = taps.some((t) => t.kind === "audio");
+    const filters = [];
+    if (hasVideo) {
+      filters.push("[0:v:0]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
+    }
+    if (hasAudio) {
+      filters.push("[0:a:0]aresample=async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]");
+    }
+    if (filters.length > 0) {
+      args.push("-filter_complex", filters.join(";"));
+    }
+    if (hasVideo) {
+      args.push("-map", "[vout]", "-c:v", "libvpx-vp9", "-b:v", "1400k", "-crf", "30", "-deadline", "good");
+    }
+    if (hasAudio) {
+      args.push("-map", "[aout]", "-c:a", "libopus", "-b:a", "96k");
+    }
+    args.push("-f", "webm", outputFile);
+    return args;
+  }
+
+  buildSegmentGstreamerArgs(sdpFile, outputFile) {
+    const normalizedSdpFile = String(sdpFile).replace(/\\/g, "/");
+    return [
+      "-e",
+      "filesrc",
+      `location=${normalizedSdpFile}`,
+      "!",
+      "sdpdemux",
+      "name=demux",
+      "demux.",
+      "!",
+      "queue",
+      "!",
+      "application/x-rtp,media=video",
+      "!",
+      "rtpvp8depay",
+      "!",
+      "queue",
+      "!",
+      "mux.",
+      "demux.",
+      "!",
+      "queue",
+      "!",
+      "application/x-rtp,media=audio",
+      "!",
+      "rtpopusdepay",
+      "!",
+      "opusparse",
+      "!",
+      "queue",
+      "!",
+      "mux.",
+      "webmmux",
+      "name=mux",
+      "streamable=true",
+      "!",
+      "filesink",
+      `location=${outputFile}`
+    ];
+  }
+
   buildMergeArgs(inputFiles, outputFile) {
     const args = ["-loglevel", "warning"];
     for (const input of inputFiles) {
@@ -398,19 +506,19 @@ class RecordingService {
     const audioCount = inputFiles.length;
     const filters = [];
     if (videoCount === 1) {
-      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
+      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,tpad=stop_mode=clone:stop_duration=36000[vout]");
     } else if (videoCount === 2) {
-      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v0]");
-      filters.push("[1:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v1]");
-      filters.push("[v0][v1]hstack=inputs=2[vout]");
+      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo,tpad=stop_mode=clone:stop_duration=36000[v0]");
+      filters.push("[1:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo,tpad=stop_mode=clone:stop_duration=36000[v1]");
+      filters.push("[v0][v1]hstack=inputs=2:shortest=0[vout]");
     } else {
       const capped = Math.min(videoCount, 4);
       for (let i = 0; i < capped; i += 1) {
-        filters.push(`[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fifo[v${i}]`);
+        filters.push(`[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fifo,tpad=stop_mode=clone:stop_duration=36000[v${i}]`);
       }
       const joined = Array.from({ length: Math.min(videoCount, 4) }, (_v, i) => `[v${i}]`).join("");
       const layout = videoCount === 3 ? "0_0|640_0|0_360" : "0_0|640_0|0_360|640_360";
-      filters.push(`${joined}xstack=inputs=${Math.min(videoCount, 4)}:layout=${layout}[vout]`);
+      filters.push(`${joined}xstack=inputs=${Math.min(videoCount, 4)}:layout=${layout}:shortest=0[vout]`);
     }
     if (audioCount > 0) {
       const cappedAudio = Math.min(audioCount, 6);
@@ -441,6 +549,7 @@ class RecordingService {
       ffmpegStderrTail: recording.ffmpegStderrTail || "",
       segmentCount: recording.segmentCount || 0,
       mergeStderrTail: recording.mergeStderrTail || "",
+      engine: recording.engine || this.getSegmentRecordingEngine(),
       tapCount: recording.tapCount || 0,
       audioTapCount: recording.audioTapCount || 0,
       videoTapCount: recording.videoTapCount || 0
