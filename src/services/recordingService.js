@@ -10,6 +10,28 @@ class RecordingService {
     this.historyBySession = new Map();
   }
 
+  createFfmpegProcess(args) {
+    const ffmpeg = spawn(this.config.ffmpegPath || "ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderrTail = "";
+    ffmpeg.stdout.on("data", () => {});
+    ffmpeg.stderr.on("data", (chunk) => {
+      stderrTail = `${stderrTail}${chunk.toString()}`.slice(-4000);
+    });
+    return { ffmpeg, getStderrTail: () => stderrTail };
+  }
+
+  async stopFfmpeg(ffmpeg, timeoutMs = 4000) {
+    if (!ffmpeg || ffmpeg.killed) return;
+    ffmpeg.kill("SIGINT");
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs);
+      ffmpeg.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
   async start(sessionId, initiatedBy, mediasoupService) {
     if (this.activeBySession.has(sessionId)) {
       return { ok: false, reason: "recording_already_active" };
@@ -18,9 +40,8 @@ class RecordingService {
       return { ok: false, reason: "recording_disabled" };
     }
     const producerRefs = mediasoupService.listSessionProducerRefs(sessionId);
-    const audioRefs = producerRefs.filter((p) => p.kind === "audio");
-    const videoRefs = producerRefs.filter((p) => p.kind === "video");
-    if (audioRefs.length === 0 && videoRefs.length === 0) {
+    const mediaRefs = producerRefs.filter((p) => p.kind === "audio" || p.kind === "video");
+    if (mediaRefs.length === 0) {
       return { ok: false, reason: "no_media_producers" };
     }
 
@@ -29,115 +50,98 @@ class RecordingService {
     const outputDir = path.resolve(process.cwd(), this.config.outputDir || "recordings");
     await fsp.mkdir(outputDir, { recursive: true });
     const outputFile = path.join(outputDir, `${recordingId}.webm`);
-    const sdpFile = path.join(outputDir, `${recordingId}.sdp`);
-
-    const taps = [];
+    const participantIds = Array.from(new Set(mediaRefs.map((ref) => ref.participantId)));
+    const segmentRecorders = [];
     let nextPort = this.config.basePort || 50040;
     if (nextPort % 2 !== 0) nextPort += 1;
 
-    const addTap = async (ref) => {
-      if (!ref) return;
-      // FFmpeg RTP ingest is more reliable with explicit RTCP ports.
-      const transport = await mediasoupService.createPlainTransport(sessionId, { rtcpMux: false, comedia: false });
-      const rtpPort = nextPort;
-      nextPort += 2;
-      const rtcpPort = rtpPort + 1;
-      await transport.connect({ ip: this.config.hostIp || "127.0.0.1", port: rtpPort, rtcpPort });
-      const room = mediasoupService.getRoom(sessionId);
-      const consumer = await transport.consume({
-        producerId: ref.producerId,
-        rtpCapabilities: room.router.rtpCapabilities,
-        paused: true
-      });
-      if (ref.kind === "video" && typeof consumer.setPreferredLayers === "function") {
-        try {
-          // Lock recorder to a stable simulcast layer to avoid freezes caused by
-          // layer switching behavior on plain transports.
-          await consumer.setPreferredLayers({ spatialLayer: 0, temporalLayer: 2 });
-        } catch (_err) {}
-      }
-      taps.push({
-        kind: ref.kind,
-        participantId: ref.participantId,
-        producerId: ref.producerId,
-        producer: ref.producer,
-        transport,
-        consumer,
-        rtpPort,
-        rtcpPort
-      });
-      if (ref.kind === "video" && ref.producer && typeof ref.producer.requestKeyFrame === "function") {
-        try {
-          await ref.producer.requestKeyFrame();
-        } catch (_err) {}
-      }
-    };
-
     try {
-      for (const ref of audioRefs) {
-        await addTap(ref);
-      }
-      for (const ref of videoRefs) {
-        await addTap(ref);
-      }
+      for (const participantId of participantIds) {
+        const refs = mediaRefs
+          .filter((ref) => ref.participantId === participantId)
+          .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "video" ? -1 : 1));
+        if (refs.length === 0) continue;
+        const taps = [];
+        for (const ref of refs) {
+          const transport = await mediasoupService.createPlainTransport(sessionId, { rtcpMux: false, comedia: false });
+          const rtpPort = nextPort;
+          nextPort += 2;
+          const rtcpPort = rtpPort + 1;
+          await transport.connect({ ip: this.config.hostIp || "127.0.0.1", port: rtpPort, rtcpPort });
+          const room = mediasoupService.getRoom(sessionId);
+          const consumer = await transport.consume({
+            producerId: ref.producerId,
+            rtpCapabilities: room.router.rtpCapabilities,
+            paused: true
+          });
+          if (ref.kind === "video" && typeof consumer.setPreferredLayers === "function") {
+            try {
+              await consumer.setPreferredLayers({ spatialLayer: 0, temporalLayer: 2 });
+            } catch (_err) {}
+          }
+          taps.push({
+            kind: ref.kind,
+            participantId: ref.participantId,
+            producerId: ref.producerId,
+            producer: ref.producer,
+            transport,
+            consumer,
+            rtpPort,
+            rtcpPort
+          });
+        }
 
-      const sdp = this.buildSdp(taps);
-      await fsp.writeFile(sdpFile, sdp, "utf8");
-      const ffmpegArgs = this.buildFfmpegArgs(taps, sdpFile, outputFile);
-      const ffmpeg = spawn(this.config.ffmpegPath || "ffmpeg", ffmpegArgs, { stdio: ["ignore", "pipe", "pipe"] });
+        const safeParticipantId = String(participantId || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
+        const segmentFile = path.join(outputDir, `${recordingId}_${safeParticipantId}.webm`);
+        const sdpFile = path.join(outputDir, `${recordingId}_${safeParticipantId}.sdp`);
+        const sdp = this.buildSdp(taps);
+        await fsp.writeFile(sdpFile, sdp, "utf8");
+        const ffmpegArgs = this.buildFfmpegArgs(taps, sdpFile, segmentFile);
+        const { ffmpeg, getStderrTail } = this.createFfmpegProcess(ffmpegArgs);
+        segmentRecorders.push({
+          participantId,
+          outputFile: segmentFile,
+          sdpFile,
+          taps,
+          ffmpeg,
+          getStderrTail
+        });
+      }
 
       setTimeout(async () => {
-        for (const tap of taps) {
-          try {
-            await tap.consumer.resume();
-          } catch (_err) {}
-        }
-        for (const tap of taps) {
-          if (tap.kind !== "video") continue;
-          if (tap.producer && typeof tap.producer.requestKeyFrame === "function") {
+        for (const segment of segmentRecorders) {
+          for (const tap of segment.taps) {
             try {
-              await tap.producer.requestKeyFrame();
+              await tap.consumer.resume();
             } catch (_err) {}
           }
         }
       }, this.config.keyframeWarmupMs || 1500);
 
-      // Keep requesting keyframes periodically so recording can recover
-      // from packet loss/layer switches instead of freezing video.
       const keyframeIntervalMs = this.config.keyframeIntervalMs || 3000;
       const keyframeTimer = setInterval(async () => {
-        for (const tap of taps) {
-          if (tap.kind !== "video") continue;
-          if (tap.consumer && typeof tap.consumer.setPreferredLayers === "function") {
-            try {
-              await tap.consumer.setPreferredLayers({ spatialLayer: 0, temporalLayer: 2 });
-            } catch (_err) {}
-          }
-          try {
-            if (tap.consumer && typeof tap.consumer.requestKeyFrame === "function") {
-              await tap.consumer.requestKeyFrame();
-              continue;
+        for (const segment of segmentRecorders) {
+          for (const tap of segment.taps) {
+            if (tap.kind !== "video") continue;
+            if (tap.consumer && typeof tap.consumer.setPreferredLayers === "function") {
+              try {
+                await tap.consumer.setPreferredLayers({ spatialLayer: 0, temporalLayer: 2 });
+              } catch (_err) {}
             }
-          } catch (_err) {}
-          if (tap.producer && typeof tap.producer.requestKeyFrame === "function") {
             try {
-              await tap.producer.requestKeyFrame();
+              if (tap.consumer && typeof tap.consumer.requestKeyFrame === "function") {
+                await tap.consumer.requestKeyFrame();
+                continue;
+              }
             } catch (_err) {}
+            if (tap.producer && typeof tap.producer.requestKeyFrame === "function") {
+              try {
+                await tap.producer.requestKeyFrame();
+              } catch (_err) {}
+            }
           }
         }
       }, keyframeIntervalMs);
-
-      ffmpeg.stdout.on("data", () => {});
-      let stderrTail = "";
-      ffmpeg.stderr.on("data", (chunk) => {
-        stderrTail = `${stderrTail}${chunk.toString()}`.slice(-4000);
-      });
-      ffmpeg.on("exit", (code) => {
-        if (!recording._stopping && code !== 0 && code !== null) {
-          // eslint-disable-next-line no-console
-          console.error(`recording_ffmpeg_exit_nonzero session=${sessionId} code=${code} detail=${stderrTail}`);
-        }
-      });
 
       const recording = {
         recordingId,
@@ -150,22 +154,35 @@ class RecordingService {
         sizeBytes: null,
         initiatedBy,
         ffmpegStderrTail: "",
-        tapCount: taps.length,
-        audioTapCount: taps.filter((t) => t.kind === "audio").length,
-        videoTapCount: taps.filter((t) => t.kind === "video").length,
-        _ffmpeg: ffmpeg,
-        _sdpFile: sdpFile,
-        _taps: taps,
+        tapCount: segmentRecorders.reduce((sum, s) => sum + s.taps.length, 0),
+        audioTapCount: segmentRecorders.reduce((sum, s) => sum + s.taps.filter((t) => t.kind === "audio").length, 0),
+        videoTapCount: segmentRecorders.reduce((sum, s) => sum + s.taps.filter((t) => t.kind === "video").length, 0),
+        _segments: segmentRecorders,
         _keyframeTimer: keyframeTimer,
-        _stopping: false,
-        _getStderrTail: () => stderrTail
+        _stopping: false
       };
+      for (const segment of segmentRecorders) {
+        segment.ffmpeg.on("exit", (code) => {
+          if (!recording._stopping && code !== 0 && code !== null) {
+            // eslint-disable-next-line no-console
+            console.error(
+              `recording_ffmpeg_exit_nonzero session=${sessionId} participant=${segment.participantId} code=${code} detail=${segment.getStderrTail()}`
+            );
+          }
+        });
+      }
       this.activeBySession.set(sessionId, recording);
       return { ok: true, recording: this.toPublic(recording) };
     } catch (error) {
-      for (const tap of taps) {
-        try { tap.consumer.close(); } catch (_e) {}
-        try { tap.transport.close(); } catch (_e) {}
+      for (const segment of segmentRecorders) {
+        try { await this.stopFfmpeg(segment.ffmpeg); } catch (_e) {}
+        for (const tap of segment.taps || []) {
+          try { tap.consumer.close(); } catch (_e) {}
+          try { tap.transport.close(); } catch (_e) {}
+        }
+        try {
+          if (segment.sdpFile) await fsp.unlink(segment.sdpFile);
+        } catch (_e) {}
       }
       return { ok: false, reason: "recording_start_failed", detail: error.message };
     }
@@ -179,50 +196,88 @@ class RecordingService {
     const stoppedAt = new Date().toISOString();
     const durationMs = Math.max(new Date(stoppedAt).getTime() - new Date(active.startedAt).getTime(), 0);
 
-    if (active._ffmpeg && !active._ffmpeg.killed) {
-      active._stopping = true;
-      active._ffmpeg.kill("SIGINT");
-      await new Promise((resolve) => {
-        const timer = setTimeout(resolve, 3000);
-        active._ffmpeg.once("exit", () => {
-          clearTimeout(timer);
-          resolve();
-        });
-      });
-    }
+    active._stopping = true;
 
     if (active._keyframeTimer) {
       clearInterval(active._keyframeTimer);
     }
 
-    for (const tap of active._taps || []) {
-      try { tap.consumer.close(); } catch (_e) {}
-      try { tap.transport.close(); } catch (_e) {}
+    const segments = active._segments || [];
+    for (const segment of segments) {
+      try {
+        await this.stopFfmpeg(segment.ffmpeg);
+      } catch (_e) {}
+    }
+    for (const segment of segments) {
+      for (const tap of segment.taps || []) {
+        try { tap.consumer.close(); } catch (_e) {}
+        try { tap.transport.close(); } catch (_e) {}
+      }
+      try {
+        if (segment.sdpFile) await fsp.unlink(segment.sdpFile);
+      } catch (_e) {}
+    }
+
+    const segmentDetails = segments.map((segment) => ({
+      participantId: segment.participantId,
+      outputFile: segment.outputFile,
+      hasVideo: (segment.taps || []).some((tap) => tap.kind === "video"),
+      hasAudio: (segment.taps || []).some((tap) => tap.kind === "audio"),
+      stderrTail: segment.getStderrTail ? segment.getStderrTail() : ""
+    }));
+    const existingSegmentFiles = [];
+    for (const seg of segmentDetails) {
+      try {
+        await fsp.access(seg.outputFile);
+        existingSegmentFiles.push(seg);
+      } catch (_e) {}
+    }
+
+    let finalOutputFile = active.storageUri;
+    if (existingSegmentFiles.length === 1) {
+      finalOutputFile = existingSegmentFiles[0].outputFile;
+    } else if (existingSegmentFiles.length > 1) {
+      const mergeCandidates = existingSegmentFiles.filter((seg) => seg.hasVideo);
+      const mergeInputs = (mergeCandidates.length > 0 ? mergeCandidates : existingSegmentFiles).map((seg) => seg.outputFile);
+      const mergeArgs = this.buildMergeArgs(mergeInputs, finalOutputFile);
+      const { ffmpeg: mergeFfmpeg, getStderrTail: getMergeStderrTail } = this.createFfmpegProcess(mergeArgs);
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 30000);
+        mergeFfmpeg.once("exit", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+      const mergeStderrTail = getMergeStderrTail();
+      for (const seg of existingSegmentFiles) {
+        try {
+          await fsp.unlink(seg.outputFile);
+        } catch (_e) {}
+      }
+      active._mergeStderrTail = mergeStderrTail;
     }
 
     let sizeBytes = null;
     try {
-      const stat = await fsp.stat(active.storageUri);
+      const stat = await fsp.stat(finalOutputFile);
       sizeBytes = stat.size;
-    } catch (_err) {}
-
-    try {
-      if (active._sdpFile) await fsp.unlink(active._sdpFile);
     } catch (_err) {}
 
     const finished = {
       ...active,
       state: "stopped",
+      storageUri: finalOutputFile,
       stoppedAt,
       durationMs,
       stoppedBy,
       sizeBytes,
-      ffmpegStderrTail: typeof active._getStderrTail === "function" ? active._getStderrTail() : ""
+      ffmpegStderrTail: segmentDetails.map((seg) => seg.stderrTail).filter(Boolean).join("\n"),
+      segmentCount: existingSegmentFiles.length,
+      mergeStderrTail: active._mergeStderrTail || ""
     };
-    delete finished._ffmpeg;
-    delete finished._sdpFile;
-    delete finished._taps;
+    delete finished._segments;
     delete finished._keyframeTimer;
+    delete finished._mergeStderrTail;
 
     this.activeBySession.delete(sessionId);
     const existing = this.historyBySession.get(sessionId) || [];
@@ -334,6 +389,43 @@ class RecordingService {
     return args;
   }
 
+  buildMergeArgs(inputFiles, outputFile) {
+    const args = ["-loglevel", "warning"];
+    for (const input of inputFiles) {
+      args.push("-i", input);
+    }
+    const videoCount = inputFiles.length;
+    const audioCount = inputFiles.length;
+    const filters = [];
+    if (videoCount === 1) {
+      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
+    } else if (videoCount === 2) {
+      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v0]");
+      filters.push("[1:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v1]");
+      filters.push("[v0][v1]hstack=inputs=2[vout]");
+    } else {
+      const capped = Math.min(videoCount, 4);
+      for (let i = 0; i < capped; i += 1) {
+        filters.push(`[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fifo[v${i}]`);
+      }
+      const joined = Array.from({ length: Math.min(videoCount, 4) }, (_v, i) => `[v${i}]`).join("");
+      const layout = videoCount === 3 ? "0_0|640_0|0_360" : "0_0|640_0|0_360|640_360";
+      filters.push(`${joined}xstack=inputs=${Math.min(videoCount, 4)}:layout=${layout}[vout]`);
+    }
+    if (audioCount > 0) {
+      const cappedAudio = Math.min(audioCount, 6);
+      const audioPrep = Array.from({ length: cappedAudio }, (_v, i) => `[${i}:a]aresample=async=1:first_pts=0[a${i}]`).join(";");
+      filters.push(`${audioPrep};${Array.from({ length: cappedAudio }, (_v, i) => `[a${i}]`).join("")}amix=inputs=${cappedAudio}:duration=longest:dropout_transition=2[aout]`);
+    }
+    args.push("-filter_complex", filters.join(";"));
+    args.push("-map", "[vout]", "-c:v", "libvpx-vp9", "-b:v", "2500k", "-crf", "28", "-deadline", "good");
+    if (audioCount > 0) {
+      args.push("-map", "[aout]", "-c:a", "libopus", "-b:a", "128k");
+    }
+    args.push("-f", "webm", outputFile);
+    return args;
+  }
+
   toPublic(recording) {
     return {
       recordingId: recording.recordingId,
@@ -347,6 +439,8 @@ class RecordingService {
       initiatedBy: recording.initiatedBy,
       stoppedBy: recording.stoppedBy,
       ffmpegStderrTail: recording.ffmpegStderrTail || "",
+      segmentCount: recording.segmentCount || 0,
+      mergeStderrTail: recording.mergeStderrTail || "",
       tapCount: recording.tapCount || 0,
       audioTapCount: recording.audioTapCount || 0,
       videoTapCount: recording.videoTapCount || 0
