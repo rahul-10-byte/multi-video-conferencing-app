@@ -63,6 +63,23 @@ Contract-first backend scaffold for Multi Video Conferencing App aligned to `MED
   - `VC_RECORDING_HOST_IP=127.0.0.1`
   - `VC_RECORDING_BASE_PORT=50040`
 
+### Segment Upload + Lambda processing
+
+For incremental S3 uploads and async post-processing:
+
+- `VC_RECORDING_MODE=segment_upload`
+- `VC_RECORDING_ENGINE=ffmpeg`
+- `VC_RECORDING_CHUNK_SECONDS=5`
+- `VC_RECORDING_S3_BUCKET=<bucket>`
+- `VC_RECORDING_S3_PREFIX=recordings`
+- `VC_RECORDING_PROCESSING_LAMBDA=<lambda-name>`
+- `AWS_REGION=<region>`
+
+Lambda handler template is included at:
+
+- `lambda/recording-processor/index.js`
+- `lambda/recording-processor/README.md`
+
 ## Run
 
 1. Copy `.env.example` to `.env` and update values.

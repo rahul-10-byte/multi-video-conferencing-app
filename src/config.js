@@ -47,7 +47,12 @@ const config = {
     outputDir: process.env.VC_RECORDING_OUTPUT_DIR || "recordings",
     hostIp: process.env.VC_RECORDING_HOST_IP || "127.0.0.1",
     basePort: intFromEnv("VC_RECORDING_BASE_PORT", 50040),
-    mergeConcurrency: intFromEnv("VC_RECORDING_MERGE_CONCURRENCY", 1)
+    mergeConcurrency: intFromEnv("VC_RECORDING_MERGE_CONCURRENCY", 1),
+    chunkSeconds: intFromEnv("VC_RECORDING_CHUNK_SECONDS", 5),
+    s3Bucket: process.env.VC_RECORDING_S3_BUCKET || "",
+    s3Prefix: process.env.VC_RECORDING_S3_PREFIX || "recordings",
+    awsRegion: process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "ap-south-1",
+    processingLambdaName: process.env.VC_RECORDING_PROCESSING_LAMBDA || ""
   },
   turn: {
     stunUrl: process.env.TURN_STUN_URL || "stun:localhost:3478",

@@ -190,7 +190,81 @@ class RecordingService {
 
   getRecordingMode() {
     const mode = String(this.config.mode || "segment_merge").toLowerCase();
-    return mode === "live_compose" ? "live_compose" : "segment_merge";
+    if (mode === "live_compose") return "live_compose";
+    if (mode === "segment_upload") return "segment_upload";
+    return "segment_merge";
+  }
+
+  getChunkSeconds() {
+    const value = Number.parseInt(String(this.config.chunkSeconds || 5), 10);
+    if (Number.isNaN(value) || value < 2) return 5;
+    return Math.min(value, 60);
+  }
+
+  async listChunkFiles(segment, includeLatest = false) {
+    if (!segment?.isChunked) {
+      if (!segment?.outputFile) return [];
+      return [segment.outputFile];
+    }
+    let names = [];
+    try {
+      names = await fsp.readdir(segment.outputDir);
+    } catch (_e) {
+      return [];
+    }
+    const prefix = String(segment.chunkFilePrefix || "");
+    const files = names
+      .filter((name) => name.startsWith(prefix) && name.endsWith(".webm"))
+      .sort()
+      .map((name) => path.join(segment.outputDir, name));
+    if (includeLatest) return files;
+    return files.length > 1 ? files.slice(0, files.length - 1) : [];
+  }
+
+  async uploadPendingChunks(recording, hooks = {}, includeLatest = false) {
+    const uploadChunk =
+      typeof hooks.onUploadChunk === "function"
+        ? hooks.onUploadChunk
+        : typeof this.config.onUploadChunk === "function"
+          ? this.config.onUploadChunk
+          : null;
+    if (!uploadChunk) return;
+    const segments = recording?._segments || [];
+    for (const segment of segments) {
+      const candidates = await this.listChunkFiles(segment, includeLatest);
+      const pendingFiles = candidates.filter((file) => !segment.uploadedChunks.has(file));
+      if (pendingFiles.length === 0) continue;
+      const segmentDetails = pendingFiles.map((outputFile) => ({
+        participantId: segment.participantId,
+        outputFile,
+        hasVideo: (segment.taps || []).some((tap) => tap.kind === "video"),
+        hasAudio: (segment.taps || []).some((tap) => tap.kind === "audio")
+      }));
+      try {
+        const uploaded = await uploadChunk({
+          recording: this.toPublic(recording),
+          segmentDetails
+        });
+        const uploadedPaths = Array.isArray(uploaded)
+          ? uploaded.map((item) => item.localPath).filter(Boolean)
+          : pendingFiles;
+        for (const file of uploadedPaths) {
+          segment.uploadedChunks.add(file);
+        }
+        if (Array.isArray(uploaded)) {
+          for (const item of uploaded) {
+            if (!item?.localPath) continue;
+            segment.uploadedDetailsByPath.set(item.localPath, {
+              participantId: segment.participantId,
+              outputFile: item.localPath,
+              hasVideo: Boolean(item.hasVideo),
+              hasAudio: Boolean(item.hasAudio),
+              stderrTail: segment.getStderrTail ? segment.getStderrTail() : ""
+            });
+          }
+        }
+      } catch (_error) {}
+    }
   }
 
   async startLiveComposeRecording({
@@ -348,6 +422,7 @@ class RecordingService {
       }
     }
 
+    const isSegmentUploadMode = this.getRecordingMode() === "segment_upload";
     try {
       for (const participantId of participantIds) {
         const refs = mediaRefs
@@ -385,25 +460,38 @@ class RecordingService {
         }
 
         const safeParticipantId = String(participantId || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
+        const chunkFilePrefix = `${recordingId}_${safeParticipantId}_`;
         const segmentFile = path.join(outputDir, `${recordingId}_${safeParticipantId}.webm`);
+        const chunkPattern = path.join(outputDir, `${chunkFilePrefix}%06d.webm`);
         const sdpFile = path.join(outputDir, `${recordingId}_${safeParticipantId}.sdp`);
         const sdp = this.buildSdp(taps);
         await fsp.writeFile(sdpFile, sdp, "utf8");
         const segmentEngine = this.getSegmentRecordingEngine();
+        if (isSegmentUploadMode && segmentEngine === "gstreamer") {
+          throw new Error("segment_upload_requires_ffmpeg_engine");
+        }
         const processArgs =
           segmentEngine === "gstreamer"
             ? this.buildSegmentGstreamerArgs(sdpFile, segmentFile)
-            : this.buildSegmentFfmpegArgs(taps, sdpFile, segmentFile);
+            : this.buildSegmentFfmpegArgs(taps, sdpFile, isSegmentUploadMode ? chunkPattern : segmentFile, {
+              chunked: isSegmentUploadMode,
+              chunkSeconds: this.getChunkSeconds()
+            });
         const processBinary = segmentEngine === "gstreamer" ? (this.config.gstreamerPath || "gst-launch-1.0") : (this.config.ffmpegPath || "ffmpeg");
         const { proc: ffmpeg, getStderrTail } = this.createProcess(processBinary, processArgs);
         segmentRecorders.push({
           participantId,
-          outputFile: segmentFile,
+          outputFile: isSegmentUploadMode ? chunkPattern : segmentFile,
           sdpFile,
           taps,
           ffmpeg,
           engine: segmentEngine,
-          getStderrTail
+          getStderrTail,
+          isChunked: isSegmentUploadMode,
+          outputDir,
+          chunkFilePrefix,
+          uploadedChunks: new Set(),
+          uploadedDetailsByPath: new Map()
         });
       }
 
@@ -442,6 +530,14 @@ class RecordingService {
         }
       }, keyframeIntervalMs);
 
+      let chunkUploadTimer = null;
+      if (isSegmentUploadMode) {
+        const uploadIntervalMs = Math.max(this.getChunkSeconds() * 1000, 5000);
+        chunkUploadTimer = setInterval(() => {
+          void this.uploadPendingChunks(recording, {}, false);
+        }, uploadIntervalMs);
+      }
+
       const recording = {
         recordingId,
         sessionId,
@@ -459,6 +555,7 @@ class RecordingService {
         videoTapCount: segmentRecorders.reduce((sum, s) => sum + s.taps.filter((t) => t.kind === "video").length, 0),
         _segments: segmentRecorders,
         _keyframeTimer: keyframeTimer,
+        _chunkUploadTimer: chunkUploadTimer,
         _stopping: false
       };
       for (const segment of segmentRecorders) {
@@ -500,6 +597,9 @@ class RecordingService {
 
     if (active._keyframeTimer) {
       clearInterval(active._keyframeTimer);
+    }
+    if (active._chunkUploadTimer) {
+      clearInterval(active._chunkUploadTimer);
     }
 
     if (active._liveCompose) {
@@ -553,13 +653,25 @@ class RecordingService {
       } catch (_e) {}
     }
 
-    const segmentDetails = segments.map((segment) => ({
-      participantId: segment.participantId,
-      outputFile: segment.outputFile,
-      hasVideo: (segment.taps || []).some((tap) => tap.kind === "video"),
-      hasAudio: (segment.taps || []).some((tap) => tap.kind === "audio"),
-      stderrTail: segment.getStderrTail ? segment.getStderrTail() : ""
-    }));
+    const segmentDetails = [];
+    for (const segment of segments) {
+      for (const uploaded of segment.uploadedDetailsByPath.values()) {
+        segmentDetails.push(uploaded);
+      }
+      const outputFiles = segment.isChunked
+        ? await this.listChunkFiles(segment, true)
+        : [segment.outputFile];
+      for (const outputFile of outputFiles) {
+        if (segment.uploadedChunks.has(outputFile)) continue;
+        segmentDetails.push({
+          participantId: segment.participantId,
+          outputFile,
+          hasVideo: (segment.taps || []).some((tap) => tap.kind === "video"),
+          hasAudio: (segment.taps || []).some((tap) => tap.kind === "audio"),
+          stderrTail: segment.getStderrTail ? segment.getStderrTail() : ""
+        });
+      }
+    }
     const existingSegmentFiles = [];
     for (const seg of segmentDetails) {
       try {
@@ -585,6 +697,61 @@ class RecordingService {
 
     this.activeBySession.delete(sessionId);
     this.upsertHistory(sessionId, processing);
+
+    if (this.getRecordingMode() === "segment_upload") {
+      const uploading = {
+        ...processing,
+        state: "uploading",
+        storageUri: ""
+      };
+      this.upsertHistory(sessionId, uploading);
+      if (typeof hooks.onUpdate === "function") {
+        await hooks.onUpdate(this.toPublic(uploading));
+      }
+      await this.uploadPendingChunks(active, hooks, true);
+      if (typeof hooks.onUploadFinalize !== "function") {
+        const failed = {
+          ...uploading,
+          state: "failed",
+          mergeStderrTail: "recording_upload_finalize_hook_missing"
+        };
+        this.upsertHistory(sessionId, failed);
+        if (typeof hooks.onUpdate === "function") {
+          await hooks.onUpdate(this.toPublic(failed));
+        }
+        return { ok: true, recording: this.toPublic(failed) };
+      }
+      try {
+        const finalized = await hooks.onUploadFinalize({
+          recording: this.toPublic(uploading),
+          segmentDetails: existingSegmentFiles
+        });
+        const finished = {
+          ...uploading,
+          state: finalized?.state || "uploaded",
+          storageUri: finalized?.storageUri || "",
+          manifestKey: finalized?.manifestKey || "",
+          sizeBytes: Number.isFinite(finalized?.sizeBytes) ? finalized.sizeBytes : null,
+          segmentCount: Number.isFinite(finalized?.segmentCount) ? finalized.segmentCount : existingSegmentFiles.length
+        };
+        this.upsertHistory(sessionId, finished);
+        if (typeof hooks.onUpdate === "function") {
+          await hooks.onUpdate(this.toPublic(finished));
+        }
+        return { ok: true, recording: this.toPublic(finished) };
+      } catch (error) {
+        const failed = {
+          ...uploading,
+          state: "failed",
+          mergeStderrTail: error.message || "recording_upload_finalize_failed"
+        };
+        this.upsertHistory(sessionId, failed);
+        if (typeof hooks.onUpdate === "function") {
+          await hooks.onUpdate(this.toPublic(failed));
+        }
+        return { ok: true, recording: this.toPublic(failed) };
+      }
+    }
 
     if (existingSegmentFiles.length <= 1) {
       let sizeBytes = null;
@@ -711,7 +878,7 @@ class RecordingService {
     return args;
   }
 
-  buildSegmentFfmpegArgs(taps, sdpFile, outputFile) {
+  buildSegmentFfmpegArgs(taps, sdpFile, outputFile, options = {}) {
     const args = [
       "-loglevel", "warning",
       "-protocol_whitelist", "file,udp,rtp",
@@ -740,6 +907,18 @@ class RecordingService {
     }
     if (hasAudio) {
       args.push("-map", "[aout]", "-c:a", "libopus", "-b:a", "96k");
+    }
+    if (options.chunked) {
+      const chunkSeconds = Number.parseInt(String(options.chunkSeconds || 5), 10);
+      args.push(
+        "-f", "segment",
+        "-segment_format", "webm",
+        "-segment_time", String(Number.isNaN(chunkSeconds) ? 5 : chunkSeconds),
+        "-reset_timestamps", "1",
+        "-strftime", "0",
+        outputFile
+      );
+      return args;
     }
     args.push("-f", "webm", outputFile);
     return args;
@@ -904,7 +1083,8 @@ class RecordingService {
       engine: recording.engine || this.getSegmentRecordingEngine(),
       tapCount: recording.tapCount || 0,
       audioTapCount: recording.audioTapCount || 0,
-      videoTapCount: recording.videoTapCount || 0
+      videoTapCount: recording.videoTapCount || 0,
+      manifestKey: recording.manifestKey || ""
     };
   }
 

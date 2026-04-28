@@ -15,6 +15,7 @@ const { EventBus } = require("./services/eventBus");
 const { PostgresReadModel } = require("./services/postgresReadModel");
 const { OtpService } = require("./services/otpService");
 const { RecordingService } = require("./services/recordingService");
+const { RecordingPipelineService } = require("./services/recordingPipelineService");
 const { setupWebSocketServer } = require("./ws");
 
 const app = express();
@@ -61,7 +62,14 @@ const otpService = new OtpService({
   maxAttempts: config.otpMaxAttempts,
   fixedCode: config.testOtpCode
 });
-const recordingService = new RecordingService(config.recording);
+const recordingPipelineService = new RecordingPipelineService(config.recording);
+const recordingService = new RecordingService({
+  ...config.recording,
+  onUploadChunk: async ({ recording, segmentDetails }) => {
+    if (!recordingPipelineService.isEnabled()) return [];
+    return await recordingPipelineService.uploadChunkFiles({ recording, segmentDetails });
+  }
+});
 const nodeId = `node_${uuidv7().replaceAll("-", "")}`;
 let reconnectWorkerRunning = false;
 
@@ -352,12 +360,33 @@ app.post("/v1/sessions/:sessionId/recording/stop", requireApiKey, async (req, re
   const result = await recordingService.stop(sessionId, stoppedBy, {
     onUpdate: async (recording) => {
       await readModel?.saveRecording(recording);
-      await eventBus.emit(recording.state === "failed" ? "recording_failed" : "recording_stopped", {
+      const eventName =
+        recording.state === "failed"
+          ? "recording_failed"
+          : recording.state === "uploading"
+            ? "recording_uploading"
+            : recording.state === "uploaded"
+              ? "recording_uploaded"
+              : "recording_stopped";
+      await eventBus.emit(eventName, {
         sessionId,
         recordingId: recording.recordingId,
         stoppedBy,
         durationMs: recording.durationMs
       });
+    },
+    onUploadFinalize: async ({ recording, segmentDetails }) => {
+      if (!recordingPipelineService.isEnabled()) {
+        throw new Error("recording_s3_not_configured");
+      }
+      return await recordingPipelineService.finalizeAndTrigger({
+        recording,
+        segmentDetails
+      });
+    },
+    onUploadChunk: async ({ recording, segmentDetails }) => {
+      if (!recordingPipelineService.isEnabled()) return [];
+      return await recordingPipelineService.uploadChunkFiles({ recording, segmentDetails });
     }
   });
   if (!result.ok) {

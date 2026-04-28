@@ -10,6 +10,8 @@
     "test": "node --test tests/*.test.js"
   },
   "dependencies": {
+    "@aws-sdk/client-lambda": "^3.914.0",
+    "@aws-sdk/client-s3": "^3.914.0",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
