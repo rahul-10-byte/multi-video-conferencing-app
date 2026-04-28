@@ -70,6 +70,7 @@ For incremental S3 uploads and async post-processing:
 - `VC_RECORDING_MODE=segment_upload`
 - `VC_RECORDING_ENGINE=ffmpeg`
 - `VC_RECORDING_CHUNK_SECONDS=5`
+- `VC_RECORDING_CHUNK_LOGS=true` (set to `false` to mute per-chunk server logs)
 - `VC_RECORDING_S3_BUCKET=<bucket>`
 - `VC_RECORDING_S3_PREFIX=recordings`
 - `VC_RECORDING_PROCESSING_LAMBDA=<lambda-name>`

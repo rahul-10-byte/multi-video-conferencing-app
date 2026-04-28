@@ -268,6 +268,23 @@ class RecordingService {
     }
   }
 
+  async logPendingChunks(recording, includeLatest = false) {
+    if (!this.config.chunkLogs) return;
+    const segments = recording?._segments || [];
+    for (const segment of segments) {
+      const candidates = await this.listChunkFiles(segment, includeLatest);
+      const pendingLogFiles = candidates.filter((file) => !segment.loggedChunks.has(file));
+      if (pendingLogFiles.length === 0) continue;
+      for (const file of pendingLogFiles) {
+        segment.loggedChunks.add(file);
+        // eslint-disable-next-line no-console
+        console.log(
+          `[recording] chunk_ready session=${recording.sessionId} recordingId=${recording.recordingId} participant=${segment.participantId} file=${path.basename(file)}`
+        );
+      }
+    }
+  }
+
   async startLiveComposeRecording({
     sessionId,
     initiatedBy,
@@ -494,6 +511,7 @@ class RecordingService {
           isChunked: isChunkedSegmentMode,
           outputDir,
           chunkFilePrefix,
+          loggedChunks: new Set(),
           uploadedChunks: new Set(),
           uploadedDetailsByPath: new Map()
         });
@@ -535,6 +553,13 @@ class RecordingService {
       }, keyframeIntervalMs);
 
       let chunkUploadTimer = null;
+      let chunkLogTimer = null;
+      if (isChunkedSegmentMode && this.config.chunkLogs) {
+        const logIntervalMs = Math.max(this.getChunkSeconds() * 1000, 5000);
+        chunkLogTimer = setInterval(() => {
+          void this.logPendingChunks(recording, false);
+        }, logIntervalMs);
+      }
       if (isSegmentUploadMode) {
         const uploadIntervalMs = Math.max(this.getChunkSeconds() * 1000, 5000);
         chunkUploadTimer = setInterval(() => {
@@ -560,6 +585,7 @@ class RecordingService {
         _segments: segmentRecorders,
         _keyframeTimer: keyframeTimer,
         _chunkUploadTimer: chunkUploadTimer,
+        _chunkLogTimer: chunkLogTimer,
         _stopping: false
       };
       for (const segment of segmentRecorders) {
@@ -604,6 +630,9 @@ class RecordingService {
     }
     if (active._chunkUploadTimer) {
       clearInterval(active._chunkUploadTimer);
+    }
+    if (active._chunkLogTimer) {
+      clearInterval(active._chunkLogTimer);
     }
 
     if (active._liveCompose) {
@@ -658,6 +687,7 @@ class RecordingService {
     }
 
     const segmentDetails = [];
+    await this.logPendingChunks(active, true);
     for (const segment of segments) {
       for (const uploaded of segment.uploadedDetailsByPath.values()) {
         segmentDetails.push(uploaded);
@@ -698,6 +728,7 @@ class RecordingService {
     };
     delete processing._segments;
     delete processing._keyframeTimer;
+    delete processing._chunkLogTimer;
 
     this.activeBySession.delete(sessionId);
     this.upsertHistory(sessionId, processing);
