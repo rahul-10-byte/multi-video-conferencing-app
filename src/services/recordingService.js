@@ -192,6 +192,7 @@ class RecordingService {
     const mode = String(this.config.mode || "segment_merge").toLowerCase();
     if (mode === "live_compose") return "live_compose";
     if (mode === "segment_upload") return "segment_upload";
+    if (mode === "segment_local") return "segment_local";
     return "segment_merge";
   }
 
@@ -422,7 +423,10 @@ class RecordingService {
       }
     }
 
-    const isSegmentUploadMode = this.getRecordingMode() === "segment_upload";
+    const recordingMode = this.getRecordingMode();
+    const isSegmentUploadMode = recordingMode === "segment_upload";
+    const isSegmentLocalMode = recordingMode === "segment_local";
+    const isChunkedSegmentMode = isSegmentUploadMode || isSegmentLocalMode;
     try {
       for (const participantId of participantIds) {
         const refs = mediaRefs
@@ -467,27 +471,27 @@ class RecordingService {
         const sdp = this.buildSdp(taps);
         await fsp.writeFile(sdpFile, sdp, "utf8");
         const segmentEngine = this.getSegmentRecordingEngine();
-        if (isSegmentUploadMode && segmentEngine === "gstreamer") {
-          throw new Error("segment_upload_requires_ffmpeg_engine");
+        if (isChunkedSegmentMode && segmentEngine === "gstreamer") {
+          throw new Error("segment_chunking_requires_ffmpeg_engine");
         }
         const processArgs =
           segmentEngine === "gstreamer"
             ? this.buildSegmentGstreamerArgs(sdpFile, segmentFile)
-            : this.buildSegmentFfmpegArgs(taps, sdpFile, isSegmentUploadMode ? chunkPattern : segmentFile, {
-              chunked: isSegmentUploadMode,
+            : this.buildSegmentFfmpegArgs(taps, sdpFile, isChunkedSegmentMode ? chunkPattern : segmentFile, {
+              chunked: isChunkedSegmentMode,
               chunkSeconds: this.getChunkSeconds()
             });
         const processBinary = segmentEngine === "gstreamer" ? (this.config.gstreamerPath || "gst-launch-1.0") : (this.config.ffmpegPath || "ffmpeg");
         const { proc: ffmpeg, getStderrTail } = this.createProcess(processBinary, processArgs);
         segmentRecorders.push({
           participantId,
-          outputFile: isSegmentUploadMode ? chunkPattern : segmentFile,
+          outputFile: isChunkedSegmentMode ? chunkPattern : segmentFile,
           sdpFile,
           taps,
           ffmpeg,
           engine: segmentEngine,
           getStderrTail,
-          isChunked: isSegmentUploadMode,
+          isChunked: isChunkedSegmentMode,
           outputDir,
           chunkFilePrefix,
           uploadedChunks: new Set(),
@@ -751,6 +755,24 @@ class RecordingService {
         }
         return { ok: true, recording: this.toPublic(failed) };
       }
+    }
+
+    if (this.getRecordingMode() === "segment_local") {
+      let totalSizeBytes = 0;
+      for (const seg of existingSegmentFiles) {
+        try {
+          const stat = await fsp.stat(seg.outputFile);
+          totalSizeBytes += stat.size;
+        } catch (_err) {}
+      }
+      const finished = {
+        ...processing,
+        state: "stopped",
+        storageUri: this.config.outputDir || "recordings",
+        sizeBytes: totalSizeBytes
+      };
+      this.upsertHistory(sessionId, finished);
+      return { ok: true, recording: this.toPublic(finished) };
     }
 
     if (existingSegmentFiles.length <= 1) {

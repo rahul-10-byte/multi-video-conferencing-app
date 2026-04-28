@@ -75,6 +75,21 @@ For incremental S3 uploads and async post-processing:
 - `VC_RECORDING_PROCESSING_LAMBDA=<lambda-name>`
 - `AWS_REGION=<region>`
 
+### Local chunk-only mode (no S3, no merge)
+
+Use this to validate chunk generation locally without changing the upload pipeline defaults:
+
+- `VC_RECORDING_MODE=segment_local`
+- `VC_RECORDING_ENGINE=ffmpeg`
+- `VC_RECORDING_CHUNK_SECONDS=5`
+- `VC_RECORDING_OUTPUT_DIR=recordings`
+
+Behavior:
+
+- Writes rolling `.webm` chunks to the local recording output directory.
+- Does not upload chunks to S3.
+- Does not merge chunks on stop.
+
 Lambda handler template is included at:
 
 - `lambda/recording-processor/index.js`

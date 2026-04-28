@@ -7,6 +7,12 @@ function intFromEnv(name, fallback) {
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 
+function boolFromEnv(name, fallback) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  return raw.toLowerCase() === "true";
+}
+
 const config = {
   port: intFromEnv("PORT", 9000),
   baseUrl: process.env.VC_BASE_URL || "http://localhost:9000",
@@ -60,7 +66,8 @@ const config = {
     username: process.env.TURN_USERNAME || "sfuuser",
     password: process.env.TURN_PASSWORD || "sfupass123",
     ttlSeconds: intFromEnv("TURN_CREDENTIAL_TTL_SECONDS", 120)
-  }
+  },
+  wsVerboseLogs: boolFromEnv("VC_WS_VERBOSE_LOGS", false)
 };
 
 module.exports = { config };

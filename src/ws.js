@@ -135,10 +135,12 @@ function setupWebSocketServer({
 
       try {
         const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
-        // eslint-disable-next-line no-console
-        console.log(
-          `[ws] recv event=${msg?.event || "unknown"} requestId=${requestId || "none"} session=${ws.sessionId || "n/a"} participant=${ws.participantId || "n/a"}`
-        );
+        if (config.wsVerboseLogs) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `[ws] recv event=${msg?.event || "unknown"} requestId=${requestId || "none"} session=${ws.sessionId || "n/a"} participant=${ws.participantId || "n/a"}`
+          );
+        }
         const payloadValidation = validateEventPayload(msg.event, msg.data || {});
         if (!payloadValidation.ok && msg.event !== "listProducers" && msg.event !== "leave") {
           send(ws, "error", { code: payloadValidation.code, detail: payloadValidation.detail }, requestId);
