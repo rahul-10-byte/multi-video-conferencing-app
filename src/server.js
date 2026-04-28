@@ -349,13 +349,23 @@ app.post("/v1/sessions/:sessionId/recording/stop", requireApiKey, async (req, re
       return;
     }
   }
-  const result = await recordingService.stop(sessionId, stoppedBy);
+  const result = await recordingService.stop(sessionId, stoppedBy, {
+    onUpdate: async (recording) => {
+      await readModel?.saveRecording(recording);
+      await eventBus.emit(recording.state === "failed" ? "recording_failed" : "recording_stopped", {
+        sessionId,
+        recordingId: recording.recordingId,
+        stoppedBy,
+        durationMs: recording.durationMs
+      });
+    }
+  });
   if (!result.ok) {
     res.status(409).json({ error: result.reason });
     return;
   }
   await readModel?.saveRecording(result.recording);
-  await eventBus.emit("recording_stopped", {
+  await eventBus.emit(result.recording.state === "processing" ? "recording_processing" : "recording_stopped", {
     sessionId,
     recordingId: result.recording.recordingId,
     stoppedBy,

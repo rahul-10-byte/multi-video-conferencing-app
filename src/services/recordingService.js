@@ -8,6 +8,132 @@ class RecordingService {
     this.config = config;
     this.activeBySession = new Map();
     this.historyBySession = new Map();
+    this.mergeQueue = [];
+    this.activeMergeCount = 0;
+  }
+
+  upsertHistory(sessionId, recording) {
+    const existing = this.historyBySession.get(sessionId) || [];
+    const next = existing.filter((item) => item.recordingId !== recording.recordingId);
+    next.push(recording);
+    this.historyBySession.set(sessionId, next);
+  }
+
+  async pickLargestSegment(segmentFiles = []) {
+    let longest = segmentFiles[0] || null;
+    let longestSize = -1;
+    for (const seg of segmentFiles) {
+      try {
+        const stat = await fsp.stat(seg.outputFile);
+        if (stat.size > longestSize) {
+          longestSize = stat.size;
+          longest = seg;
+        }
+      } catch (_e) {}
+    }
+    return longest;
+  }
+
+  async finalizeSegmentMerge(active, processing, segmentDetails, existingSegmentFiles, hooks = {}) {
+    let finalOutputFile = active.storageUri;
+    let mergeStderrTail = "";
+    let finalState = "stopped";
+
+    try {
+      if (existingSegmentFiles.length === 1) {
+        finalOutputFile = existingSegmentFiles[0].outputFile;
+      } else if (existingSegmentFiles.length > 1) {
+        const mergeCandidates = existingSegmentFiles.filter((seg) => seg.hasVideo);
+        const mergeInputs = (mergeCandidates.length > 0 ? mergeCandidates : existingSegmentFiles).map((seg) => seg.outputFile);
+        const mergeArgs = this.buildMergeArgs(mergeInputs, finalOutputFile);
+        const { proc: mergeFfmpeg, getStderrTail: getMergeStderrTail } = this.createProcess(this.config.ffmpegPath || "ffmpeg", mergeArgs);
+        const mergeExitCode = await this.waitProcessExit(mergeFfmpeg, 45 * 60 * 1000);
+        mergeStderrTail = getMergeStderrTail();
+        if (mergeExitCode === 0) {
+          for (const seg of existingSegmentFiles) {
+            try {
+              await fsp.unlink(seg.outputFile);
+            } catch (_e) {}
+          }
+        } else {
+          const longest = await this.pickLargestSegment(existingSegmentFiles);
+          if (longest) {
+            finalOutputFile = longest.outputFile;
+          }
+          finalState = mergeExitCode === null ? "failed" : "stopped";
+        }
+      }
+    } catch (error) {
+      finalState = "failed";
+      mergeStderrTail = `${mergeStderrTail}\n${error.message}`.trim();
+      const longest = await this.pickLargestSegment(existingSegmentFiles);
+      if (longest) {
+        finalOutputFile = longest.outputFile;
+      }
+    }
+
+    let sizeBytes = null;
+    try {
+      const stat = await fsp.stat(finalOutputFile);
+      sizeBytes = stat.size;
+    } catch (_err) {}
+
+    const finished = {
+      ...processing,
+      state: finalState,
+      storageUri: finalOutputFile,
+      sizeBytes,
+      ffmpegStderrTail: segmentDetails.map((seg) => seg.stderrTail).filter(Boolean).join("\n"),
+      segmentCount: existingSegmentFiles.length,
+      mergeStderrTail
+    };
+
+    this.upsertHistory(processing.sessionId, finished);
+    if (typeof hooks.onUpdate === "function") {
+      await hooks.onUpdate(this.toPublic(finished));
+    }
+  }
+
+  getMergeConcurrency() {
+    const value = Number.parseInt(String(this.config.mergeConcurrency || 1), 10);
+    return Number.isNaN(value) || value < 1 ? 1 : value;
+  }
+
+  enqueueSegmentMerge(job) {
+    this.mergeQueue.push(job);
+    void this.drainMergeQueue();
+  }
+
+  async drainMergeQueue() {
+    const concurrency = this.getMergeConcurrency();
+    if (this.activeMergeCount >= concurrency) return;
+
+    const nextJob = this.mergeQueue.shift();
+    if (!nextJob) return;
+
+    this.activeMergeCount += 1;
+    try {
+      await this.finalizeSegmentMerge(
+        nextJob.active,
+        nextJob.processing,
+        nextJob.segmentDetails,
+        nextJob.existingSegmentFiles,
+        nextJob.hooks
+      );
+    } catch (error) {
+      const failed = {
+        ...nextJob.processing,
+        state: "failed",
+        mergeStderrTail: error.message || "merge_background_failed"
+      };
+      this.upsertHistory(nextJob.processing.sessionId, failed);
+      if (typeof nextJob.hooks?.onUpdate === "function") {
+        await nextJob.hooks.onUpdate(this.toPublic(failed));
+      }
+    } finally {
+      this.activeMergeCount = Math.max(this.activeMergeCount - 1, 0);
+      void this.drainMergeQueue();
+    }
   }
 
   createProcess(binary, args) {
@@ -362,7 +488,7 @@ class RecordingService {
     }
   }
 
-  async stop(sessionId, stoppedBy) {
+  async stop(sessionId, stoppedBy, hooks = {}) {
     const active = this.activeBySession.get(sessionId);
     if (!active) {
       return { ok: false, reason: "recording_not_active" };
@@ -407,9 +533,7 @@ class RecordingService {
       delete finished._liveGetStderrTail;
       delete finished._keyframeTimer;
       this.activeBySession.delete(sessionId);
-      const existing = this.historyBySession.get(sessionId) || [];
-      existing.push(finished);
-      this.historyBySession.set(sessionId, existing);
+      this.upsertHistory(sessionId, finished);
       return { ok: true, recording: this.toPublic(finished) };
     }
 
@@ -444,67 +568,44 @@ class RecordingService {
       } catch (_e) {}
     }
 
-    let finalOutputFile = active.storageUri;
-    if (existingSegmentFiles.length === 1) {
-      finalOutputFile = existingSegmentFiles[0].outputFile;
-    } else if (existingSegmentFiles.length > 1) {
-      const mergeCandidates = existingSegmentFiles.filter((seg) => seg.hasVideo);
-      const mergeInputs = (mergeCandidates.length > 0 ? mergeCandidates : existingSegmentFiles).map((seg) => seg.outputFile);
-      const mergeArgs = this.buildMergeArgs(mergeInputs, finalOutputFile);
-      const { proc: mergeFfmpeg, getStderrTail: getMergeStderrTail } = this.createProcess(this.config.ffmpegPath || "ffmpeg", mergeArgs);
-      const mergeExitCode = await this.waitProcessExit(mergeFfmpeg, 45000);
-      const mergeStderrTail = getMergeStderrTail();
-      if (mergeExitCode === 0) {
-        for (const seg of existingSegmentFiles) {
-          try {
-            await fsp.unlink(seg.outputFile);
-          } catch (_e) {}
-        }
-      } else {
-        // Fallback to the longest available segment when merge fails.
-        let longest = existingSegmentFiles[0];
-        let longestSize = -1;
-        for (const seg of existingSegmentFiles) {
-          try {
-            const stat = await fsp.stat(seg.outputFile);
-            if (stat.size > longestSize) {
-              longestSize = stat.size;
-              longest = seg;
-            }
-          } catch (_e) {}
-        }
-        finalOutputFile = longest.outputFile;
-      }
-      active._mergeStderrTail = mergeStderrTail;
-    }
-
-    let sizeBytes = null;
-    try {
-      const stat = await fsp.stat(finalOutputFile);
-      sizeBytes = stat.size;
-    } catch (_err) {}
-
-    const finished = {
+    const processing = {
       ...active,
-      state: "stopped",
-      storageUri: finalOutputFile,
+      state: existingSegmentFiles.length > 1 ? "processing" : "stopped",
+      storageUri: existingSegmentFiles.length === 1 ? existingSegmentFiles[0].outputFile : active.storageUri,
       stoppedAt,
       durationMs,
       stoppedBy,
-      sizeBytes,
+      sizeBytes: null,
       ffmpegStderrTail: segmentDetails.map((seg) => seg.stderrTail).filter(Boolean).join("\n"),
       segmentCount: existingSegmentFiles.length,
-      mergeStderrTail: active._mergeStderrTail || ""
+      mergeStderrTail: ""
     };
-    delete finished._segments;
-    delete finished._keyframeTimer;
-    delete finished._mergeStderrTail;
+    delete processing._segments;
+    delete processing._keyframeTimer;
 
     this.activeBySession.delete(sessionId);
-    const existing = this.historyBySession.get(sessionId) || [];
-    existing.push(finished);
-    this.historyBySession.set(sessionId, existing);
-    return { ok: true, recording: this.toPublic(finished) };
+    this.upsertHistory(sessionId, processing);
+
+    if (existingSegmentFiles.length <= 1) {
+      let sizeBytes = null;
+      try {
+        const stat = await fsp.stat(processing.storageUri);
+        sizeBytes = stat.size;
+      } catch (_err) {}
+      const finished = { ...processing, sizeBytes };
+      this.upsertHistory(sessionId, finished);
+      return { ok: true, recording: this.toPublic(finished) };
+    }
+
+    this.enqueueSegmentMerge({
+      active,
+      processing,
+      segmentDetails,
+      existingSegmentFiles,
+      hooks
+    });
+
+    return { ok: true, recording: this.toPublic(processing) };
   }
 
   buildSdp(taps) {
@@ -777,7 +878,7 @@ class RecordingService {
       filters.push(`${audioPrep};${Array.from({ length: cappedAudio }, (_v, i) => `[a${i}]`).join("")}amix=inputs=${cappedAudio}:duration=longest:dropout_transition=2[aout]`);
     }
     args.push("-filter_complex", filters.join(";"));
-    args.push("-map", "[vout]", "-c:v", "libvpx-vp9", "-b:v", "1200k", "-crf", "32", "-deadline", "realtime", "-cpu-used", "5");
+    args.push("-map", "[vout]", "-c:v", "libvpx-vp9", "-b:v", "1200k", "-crf", "32", "-deadline", "realtime", "-cpu-used", "3");
     if (audioCount > 0) {
       args.push("-map", "[aout]", "-c:a", "libopus", "-b:a", "64k");
     }

@@ -46,7 +46,8 @@ const config = {
     gstreamerPath: process.env.VC_GSTREAMER_PATH || "gst-launch-1.0",
     outputDir: process.env.VC_RECORDING_OUTPUT_DIR || "recordings",
     hostIp: process.env.VC_RECORDING_HOST_IP || "127.0.0.1",
-    basePort: intFromEnv("VC_RECORDING_BASE_PORT", 50040)
+    basePort: intFromEnv("VC_RECORDING_BASE_PORT", 50040),
+    mergeConcurrency: intFromEnv("VC_RECORDING_MERGE_CONCURRENCY", 1)
   },
   turn: {
     stunUrl: process.env.TURN_STUN_URL || "stun:localhost:3478",
