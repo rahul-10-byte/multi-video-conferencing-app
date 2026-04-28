@@ -757,18 +757,18 @@ class RecordingService {
     const audioCount = inputFiles.length;
     const filters = [];
     if (videoCount === 1) {
-      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
+      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=960:540:force_original_aspect_ratio=decrease,pad=960:540:(ow-iw)/2:(oh-ih)/2[vout]");
     } else if (videoCount === 2) {
-      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v0]");
-      filters.push("[1:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v1]");
+      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=480:540:force_original_aspect_ratio=decrease,pad=480:540:(ow-iw)/2:(oh-ih)/2,fifo[v0]");
+      filters.push("[1:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=480:540:force_original_aspect_ratio=decrease,pad=480:540:(ow-iw)/2:(oh-ih)/2,fifo[v1]");
       filters.push("[v0][v1]hstack=inputs=2:shortest=0[vout]");
     } else {
       const capped = Math.min(videoCount, 4);
       for (let i = 0; i < capped; i += 1) {
-        filters.push(`[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fifo[v${i}]`);
+        filters.push(`[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2,fifo[v${i}]`);
       }
       const joined = Array.from({ length: Math.min(videoCount, 4) }, (_v, i) => `[v${i}]`).join("");
-      const layout = videoCount === 3 ? "0_0|640_0|0_360" : "0_0|640_0|0_360|640_360";
+      const layout = videoCount === 3 ? "0_0|480_0|0_270" : "0_0|480_0|0_270|480_270";
       filters.push(`${joined}xstack=inputs=${Math.min(videoCount, 4)}:layout=${layout}:shortest=0[vout]`);
     }
     if (audioCount > 0) {
@@ -777,9 +777,9 @@ class RecordingService {
       filters.push(`${audioPrep};${Array.from({ length: cappedAudio }, (_v, i) => `[a${i}]`).join("")}amix=inputs=${cappedAudio}:duration=longest:dropout_transition=2[aout]`);
     }
     args.push("-filter_complex", filters.join(";"));
-    args.push("-map", "[vout]", "-c:v", "libvpx-vp9", "-b:v", "2500k", "-crf", "28", "-deadline", "good");
+    args.push("-map", "[vout]", "-c:v", "libvpx-vp9", "-b:v", "1200k", "-crf", "32", "-deadline", "realtime", "-cpu-used", "5");
     if (audioCount > 0) {
-      args.push("-map", "[aout]", "-c:a", "libopus", "-b:a", "128k");
+      args.push("-map", "[aout]", "-c:a", "libopus", "-b:a", "64k");
     }
     args.push("-f", "webm", outputFile);
     return args;
