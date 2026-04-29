@@ -264,6 +264,7 @@ class RecordingService {
     if (mode === "segment_upload") return "segment_upload";
     if (mode === "segment_local") return "segment_local";
     if (mode === "segment_merge_mp4") return "segment_merge_mp4";
+    if (mode === "segment_upload_mp4") return "segment_upload_mp4";
     return "segment_merge";
   }
 
@@ -581,7 +582,7 @@ class RecordingService {
     const outputDir = path.resolve(process.cwd(), this.config.outputDir || "recordings");
     await fsp.mkdir(outputDir, { recursive: true });
     const recordingMode = this.getRecordingMode();
-    const isMp4MergeMode = recordingMode === "segment_merge_mp4";
+    const isMp4MergeMode = recordingMode === "segment_merge_mp4" || recordingMode === "segment_upload_mp4";
     const outputFile = path.join(outputDir, `${recordingId}.${isMp4MergeMode ? "mp4" : "webm"}`);
     const participantIds = Array.from(new Set(mediaRefs.map((ref) => ref.participantId)));
     const segmentRecorders = [];
@@ -914,12 +915,12 @@ class RecordingService {
       );
     }
 
-    const isMp4MergeMode = active.mode === "segment_merge_mp4";
-    const willRunMerge = existingSegmentFiles.length > 1 || (isMp4MergeMode && existingSegmentFiles.length >= 1);
+    const isLocalMp4MergeMode = active.mode === "segment_merge_mp4";
+    const willRunMerge = existingSegmentFiles.length > 1 || (isLocalMp4MergeMode && existingSegmentFiles.length >= 1);
     const processing = {
       ...active,
       state: willRunMerge ? "processing" : "stopped",
-      storageUri: !isMp4MergeMode && existingSegmentFiles.length === 1
+      storageUri: !isLocalMp4MergeMode && existingSegmentFiles.length === 1
         ? existingSegmentFiles[0].outputFile
         : active.storageUri,
       stoppedAt,
@@ -1032,6 +1033,69 @@ class RecordingService {
           ...localUploading,
           state: "failed",
           mergeStderrTail: error.message || "local_chunk_finalize_failed"
+        };
+        this.upsertHistory(sessionId, failed);
+        if (typeof hooks.onUpdate === "function") {
+          await hooks.onUpdate(this.toPublic(failed));
+        }
+        return { ok: true, recording: this.toPublic(failed) };
+      }
+    }
+
+    if (this.getRecordingMode() === "segment_upload_mp4") {
+      const uploading = {
+        ...processing,
+        state: "uploading",
+        storageUri: ""
+      };
+      this.upsertHistory(sessionId, uploading);
+      if (typeof hooks.onUpdate === "function") {
+        await hooks.onUpdate(this.toPublic(uploading));
+      }
+      if (typeof hooks.onUploadFinalize !== "function") {
+        const failed = {
+          ...uploading,
+          state: "failed",
+          mergeStderrTail: "recording_upload_finalize_hook_missing"
+        };
+        this.upsertHistory(sessionId, failed);
+        if (typeof hooks.onUpdate === "function") {
+          await hooks.onUpdate(this.toPublic(failed));
+        }
+        return { ok: true, recording: this.toPublic(failed) };
+      }
+      try {
+        const finalized = await hooks.onUploadFinalize({
+          recording: this.toPublic(uploading),
+          segmentDetails: existingSegmentFiles
+        });
+        // Upload + Lambda invoke succeeded. Per-participant WebMs are now
+        // safely on S3 and Lambda has been triggered, so delete the local
+        // copies to keep disk usage bounded. Failure paths (catch below)
+        // intentionally leave local files in place for manual recovery.
+        for (const seg of existingSegmentFiles) {
+          try {
+            await fsp.unlink(seg.outputFile);
+          } catch (_e) {}
+        }
+        const finished = {
+          ...uploading,
+          state: finalized?.state || "uploaded",
+          storageUri: finalized?.storageUri || "",
+          manifestKey: finalized?.manifestKey || "",
+          sizeBytes: Number.isFinite(finalized?.sizeBytes) ? finalized.sizeBytes : null,
+          segmentCount: Number.isFinite(finalized?.segmentCount) ? finalized.segmentCount : existingSegmentFiles.length
+        };
+        this.upsertHistory(sessionId, finished);
+        if (typeof hooks.onUpdate === "function") {
+          await hooks.onUpdate(this.toPublic(finished));
+        }
+        return { ok: true, recording: this.toPublic(finished) };
+      } catch (error) {
+        const failed = {
+          ...uploading,
+          state: "failed",
+          mergeStderrTail: error.message || "recording_upload_finalize_failed"
         };
         this.upsertHistory(sessionId, failed);
         if (typeof hooks.onUpdate === "function") {
@@ -1404,15 +1468,15 @@ class RecordingService {
     const audioCount = inputFiles.length;
     const filters = [];
     if (videoCount === 1) {
-      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
+      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
     } else if (videoCount === 2) {
-      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v0]");
-      filters.push("[1:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v1]");
+      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v0]");
+      filters.push("[1:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v1]");
       filters.push("[v0][v1]hstack=inputs=2:shortest=0[vout]");
     } else {
       const capped = Math.min(videoCount, 4);
       for (let i = 0; i < capped; i += 1) {
-        filters.push(`[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fifo[v${i}]`);
+        filters.push(`[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fifo[v${i}]`);
       }
       const joined = Array.from({ length: capped }, (_v, i) => `[v${i}]`).join("");
       const layout = capped === 3 ? "0_0|640_0|0_360" : "0_0|640_0|0_360|640_360";
@@ -1424,7 +1488,7 @@ class RecordingService {
       filters.push(`${audioPrep};${Array.from({ length: cappedAudio }, (_v, i) => `[a${i}]`).join("")}amix=inputs=${cappedAudio}:duration=longest:dropout_transition=2[aout]`);
     }
     args.push("-filter_complex", filters.join(";"));
-    const preset = String(this.config.mp4Preset || "veryfast");
+    const preset = String(this.config.mp4Preset || "ultrafast");
     const crf = String(this.config.mp4Crf || 23);
     args.push(
       "-map", "[vout]",
@@ -1459,6 +1523,7 @@ class RecordingService {
       segmentCount: recording.segmentCount || 0,
       mergeStderrTail: recording.mergeStderrTail || "",
       engine: recording.engine || this.getSegmentRecordingEngine(),
+      mode: recording.mode || this.getRecordingMode(),
       tapCount: recording.tapCount || 0,
       audioTapCount: recording.audioTapCount || 0,
       videoTapCount: recording.videoTapCount || 0,

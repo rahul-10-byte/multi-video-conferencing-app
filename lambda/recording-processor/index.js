@@ -75,6 +75,52 @@ function buildParticipantMergeArgs(participantFiles, outputFile) {
   return args;
 }
 
+function buildParticipantMergeArgsMp4(participantFiles, outputFile) {
+  const args = ["-loglevel", "warning"];
+  for (const input of participantFiles) args.push("-i", input);
+  const videoCount = participantFiles.length;
+  const audioCount = participantFiles.length;
+  const filters = [];
+  if (videoCount === 1) {
+    filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
+  } else if (videoCount === 2) {
+    filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v0]");
+    filters.push("[1:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v1]");
+    filters.push("[v0][v1]hstack=inputs=2:shortest=0[vout]");
+  } else {
+    const capped = Math.min(videoCount, 4);
+    for (let i = 0; i < capped; i += 1) {
+      filters.push(`[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fifo[v${i}]`);
+    }
+    const joined = Array.from({ length: capped }, (_v, i) => `[v${i}]`).join("");
+    const layout = capped === 3 ? "0_0|640_0|0_360" : "0_0|640_0|0_360|640_360";
+    filters.push(`${joined}xstack=inputs=${capped}:layout=${layout}:fill=black:shortest=0[vout]`);
+  }
+  if (audioCount > 0) {
+    const cappedAudio = Math.min(audioCount, 6);
+    const audioPrep = Array.from({ length: cappedAudio }, (_v, i) => `[${i}:a]aresample=async=1:first_pts=0[a${i}]`).join(";");
+    filters.push(`${audioPrep};${Array.from({ length: cappedAudio }, (_v, i) => `[a${i}]`).join("")}amix=inputs=${cappedAudio}:duration=longest:dropout_transition=2[aout]`);
+  }
+  args.push("-filter_complex", filters.join(";"));
+  const preset = String(process.env.MP4_PRESET || "ultrafast");
+  const crf = String(process.env.MP4_CRF || "23");
+  const audioBitrate = String(process.env.MP4_AUDIO_BITRATE || "128k");
+  args.push(
+    "-map", "[vout]",
+    "-c:v", "libx264",
+    "-preset", preset,
+    "-crf", crf,
+    "-pix_fmt", "yuv420p",
+    "-profile:v", "high",
+    "-level", "4.0"
+  );
+  if (audioCount > 0) {
+    args.push("-map", "[aout]", "-c:a", "aac", "-b:a", audioBitrate);
+  }
+  args.push("-movflags", "+faststart", "-f", "mp4", outputFile);
+  return args;
+}
+
 async function downloadToFile(bucket, key, localPath) {
   const response = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
   const buffer = await streamToBuffer(response.Body);
@@ -104,9 +150,9 @@ function buildResultKey(manifestKey) {
   return `${dir}/processing-result.json`;
 }
 
-function buildFinalKey(manifestKey) {
+function buildFinalKey(manifestKey, extension = "webm") {
   const dir = path.posix.dirname(manifestKey);
-  return `${dir}/${outputPrefixSuffix}.webm`;
+  return `${dir}/${outputPrefixSuffix}.${extension}`;
 }
 
 async function uploadJson(bucket, key, value) {
@@ -136,6 +182,8 @@ exports.handler = async (event) => {
     const manifest = JSON.parse(manifestRaw.toString("utf8"));
     const segments = Array.isArray(manifest.segments) ? manifest.segments : [];
     if (segments.length === 0) throw new Error("manifest_has_no_segments");
+    const outputFormat = String(manifest.outputFormat || "webm").toLowerCase();
+    const isMp4 = outputFormat === "mp4";
 
     const byParticipant = new Map();
     for (const seg of segments) {
@@ -158,24 +206,35 @@ exports.handler = async (event) => {
         await downloadToFile(bucket, seg.key, localChunk);
         localChunkFiles.push(localChunk);
       }
-      const merged = await concatParticipantChunks(tmpRoot, participantId, localChunkFiles);
+      // For mp4 mode there is one complete WebM per participant, so skip the
+      // chunk-concat step entirely and use the downloaded file directly.
+      const merged = isMp4 && localChunkFiles.length === 1
+        ? localChunkFiles[0]
+        : await concatParticipantChunks(tmpRoot, participantId, localChunkFiles);
       participantMergedFiles.push(merged);
     }
 
-    let finalOutput = participantMergedFiles[0];
-    if (participantMergedFiles.length > 1) {
-      finalOutput = path.join(tmpRoot, "final-merged.webm");
-      const mergeArgs = buildParticipantMergeArgs(participantMergedFiles, finalOutput);
+    let finalOutput;
+    if (isMp4) {
+      finalOutput = path.join(tmpRoot, "final-merged.mp4");
+      const mergeArgs = buildParticipantMergeArgsMp4(participantMergedFiles, finalOutput);
       await runProcess(ffmpegPath, mergeArgs, 14 * 60 * 1000);
+    } else {
+      finalOutput = participantMergedFiles[0];
+      if (participantMergedFiles.length > 1) {
+        finalOutput = path.join(tmpRoot, "final-merged.webm");
+        const mergeArgs = buildParticipantMergeArgs(participantMergedFiles, finalOutput);
+        await runProcess(ffmpegPath, mergeArgs, 14 * 60 * 1000);
+      }
     }
 
-    const finalKey = buildFinalKey(manifestKey);
+    const finalKey = buildFinalKey(manifestKey, isMp4 ? "mp4" : "webm");
     const finalBody = await fsp.readFile(finalOutput);
     await s3.send(new PutObjectCommand({
       Bucket: bucket,
       Key: finalKey,
       Body: finalBody,
-      ContentType: "video/webm"
+      ContentType: isMp4 ? "video/mp4" : "video/webm"
     }));
 
     const finishedAt = new Date().toISOString();

@@ -114,10 +114,13 @@ class RecordingPipelineService {
       sessionId: recording.sessionId,
       recordingId: recording.recordingId
     });
+    const isMp4OutputMode = String(recording?.mode || "").toLowerCase() === "segment_upload_mp4";
     const manifest = {
       version: 1,
       sessionId: recording.sessionId,
       recordingId: recording.recordingId,
+      mode: recording?.mode || "",
+      outputFormat: isMp4OutputMode ? "mp4" : "webm",
       startedAt: recording.startedAt,
       stoppedAt: recording.stoppedAt,
       durationMs: recording.durationMs,
