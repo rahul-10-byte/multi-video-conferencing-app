@@ -843,7 +843,7 @@ select {
     width: 100%;
     max-width: 100%;
     padding: 8px;
-    justify-content: space-between;
+    justify-content: flex-start;
     border-radius: 14px;
   }
 
@@ -877,9 +877,14 @@ select {
   }
 
 .control-dock .split-toggle {
-  flex: 0 1 120px;
+  flex: 1 1 0;
   min-width: 0;
 }
+
+  .control-dock .control-button--leave {
+    flex: 0 0 80px;
+    min-width: 80px;
+  }
 
   .control-dock .split-toggle {
     height: 36px;
@@ -887,12 +892,16 @@ select {
 
   .split-toggle__toggle {
     height: 36px;
-    width: 50px;
+    width: 46px;
   }
 
   .pill-dropdown {
     height: 36px;
     padding: 0 8px 0 6px;
+  }
+
+  .pill-dropdown__menu {
+    width: min(180px, 66vw);
   }
 
   .pill-dropdown__button {
@@ -911,6 +920,11 @@ select {
 
   .control-button--more {
     display: grid;
+  }
+
+  .control-dock .control-button--more {
+    flex: 0 0 44px;
+    min-width: 44px;
   }
 
   .mobile-controls-menu {

@@ -1715,10 +1715,20 @@ export default function App() {
 
     setDevicePickerBusy(true);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { deviceId: { exact: deviceId } },
-      });
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { deviceId: { exact: deviceId } },
+        });
+      } catch (_error1) {
+        // Some mobile browsers don't support `deviceId: { exact }`. Fall back to facingMode.
+        const facingMode = cameras.length >= 2 && resolvedIndex === 1 ? 'environment' : 'user';
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { facingMode },
+        });
+      }
       const [newTrack] = stream.getVideoTracks();
       if (!newTrack) throw new Error('camera_track_missing');
 
