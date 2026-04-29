@@ -1098,6 +1098,25 @@ class RecordingService {
     ];
     const hasVideo = taps.some((t) => t.kind === "video");
     const hasAudio = taps.some((t) => t.kind === "audio");
+
+    // Fast path for segment_merge: when not chunking and codecs are
+    // WebM-compatible, repackage RTP into WebM with no decode/encode.
+    // Chunked modes still transcode so segment boundaries land on keyframes.
+    if (!options.chunked) {
+      const videoTap = taps.find((t) => t.kind === "video");
+      const audioTap = taps.find((t) => t.kind === "audio");
+      const videoMime = String(videoTap?.consumer?.rtpParameters?.codecs?.[0]?.mimeType || "").toLowerCase();
+      const audioMime = String(audioTap?.consumer?.rtpParameters?.codecs?.[0]?.mimeType || "").toLowerCase();
+      const videoCopyOk = !videoTap || /^video\/(vp8|vp9|av1)$/.test(videoMime);
+      const audioCopyOk = !audioTap || /^audio\/(opus|vorbis)$/.test(audioMime);
+      if (videoCopyOk && audioCopyOk) {
+        if (hasVideo) args.push("-map", "0:v:0", "-c:v", "copy");
+        if (hasAudio) args.push("-map", "0:a:0", "-c:a", "copy");
+        args.push("-f", "webm", outputFile);
+        return args;
+      }
+    }
+
     const filters = [];
     if (hasVideo) {
       filters.push("[0:v:0]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
