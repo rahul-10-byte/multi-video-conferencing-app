@@ -89,7 +89,11 @@ Behavior:
 
 - Writes rolling `.webm` chunks to the local recording output directory.
 - Does not upload chunks to S3.
-- Does not merge chunks on stop.
+- Mimics upload flow locally on stop: builds a local manifest and final merged file.
+- Local folder layout:
+  - `<VC_RECORDING_OUTPUT_DIR>/<sessionId>/<recordingId>/<participantId>/chunks/*.webm`
+  - `<VC_RECORDING_OUTPUT_DIR>/<sessionId>/<recordingId>/manifest.local.json`
+  - `<VC_RECORDING_OUTPUT_DIR>/<sessionId>/<recordingId>/final.local.webm`
 
 Lambda handler template is included at:
 

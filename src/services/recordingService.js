@@ -183,6 +183,13 @@ class RecordingService {
     });
   }
 
+  async runProcess(binary, args, timeoutMs = 10 * 60 * 1000) {
+    const { proc, getStderrTail } = this.createProcess(binary, args);
+    const exitCode = await this.waitProcessExit(proc, timeoutMs);
+    if (exitCode === 0) return;
+    throw new Error(`${binary}_failed code=${exitCode} detail=${getStderrTail()}`);
+  }
+
   getSegmentRecordingEngine() {
     const engine = String(this.config.engine || "ffmpeg").toLowerCase();
     return engine === "gstreamer" ? "gstreamer" : "ffmpeg";
@@ -283,6 +290,96 @@ class RecordingService {
         );
       }
     }
+  }
+
+  async concatParticipantChunksLocal(workDir, participantId, chunkFiles) {
+    await fsp.mkdir(workDir, { recursive: true });
+    const concatListFile = path.join(workDir, `${participantId}_concat_list.txt`);
+    const concatOutput = path.join(workDir, `${participantId}_participant.webm`);
+    const lines = chunkFiles.map((file) => `file '${String(file).replace(/'/g, "'\\''")}'`).join("\n");
+    await fsp.writeFile(concatListFile, `${lines}\n`, "utf8");
+    await this.runProcess(this.config.ffmpegPath || "ffmpeg", [
+      "-loglevel", "warning",
+      "-f", "concat",
+      "-safe", "0",
+      "-i", concatListFile,
+      "-c", "copy",
+      concatOutput
+    ], 12 * 60 * 1000);
+    return concatOutput;
+  }
+
+  async finalizeLocalChunkProcessing({ recording, segmentDetails = [] }) {
+    const outputRoot = path.resolve(process.cwd(), this.config.outputDir || "recordings");
+    const localRecordingDir = recording.localRecordingDir || outputRoot;
+    const byParticipant = new Map();
+    for (const seg of segmentDetails) {
+      if (!seg?.outputFile) continue;
+      const list = byParticipant.get(seg.participantId) || [];
+      list.push(seg);
+      byParticipant.set(seg.participantId, list);
+    }
+    if (byParticipant.size === 0) {
+      return { state: "failed", reason: "no_local_segments_found" };
+    }
+
+    const manifestPath = path.join(localRecordingDir, "manifest.local.json");
+    const participantMergedFiles = [];
+    const localMergeDir = path.join(localRecordingDir, "_local_merge_work");
+    await fsp.mkdir(localMergeDir, { recursive: true });
+
+    const manifestSegments = [];
+    for (const [participantId, segments] of byParticipant.entries()) {
+      const sorted = segments.slice().sort((a, b) => String(a.outputFile).localeCompare(String(b.outputFile)));
+      const chunkFiles = sorted.map((s) => s.outputFile);
+      for (const seg of sorted) {
+        manifestSegments.push({
+          participantId,
+          localPath: seg.outputFile,
+          hasVideo: Boolean(seg.hasVideo),
+          hasAudio: Boolean(seg.hasAudio)
+        });
+      }
+      const merged = await this.concatParticipantChunksLocal(localMergeDir, participantId, chunkFiles);
+      participantMergedFiles.push(merged);
+    }
+
+    let finalOutput = participantMergedFiles[0];
+    if (participantMergedFiles.length > 1) {
+      finalOutput = path.join(localRecordingDir, "final.local.webm");
+      const mergeArgs = this.buildMergeArgs(participantMergedFiles, finalOutput);
+      await this.runProcess(this.config.ffmpegPath || "ffmpeg", mergeArgs, 14 * 60 * 1000);
+    } else {
+      finalOutput = path.join(localRecordingDir, "final.local.webm");
+      await fsp.copyFile(participantMergedFiles[0], finalOutput);
+    }
+
+    const manifest = {
+      version: 1,
+      recordingId: recording.recordingId,
+      sessionId: recording.sessionId,
+      startedAt: recording.startedAt,
+      stoppedAt: recording.stoppedAt,
+      durationMs: recording.durationMs,
+      initiatedBy: recording.initiatedBy,
+      stoppedBy: recording.stoppedBy,
+      segmentCount: manifestSegments.length,
+      participantCount: participantMergedFiles.length,
+      segments: manifestSegments,
+      finalOutput
+    };
+    await fsp.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+    try {
+      await fsp.rm(localMergeDir, { recursive: true, force: true });
+    } catch (_e) {}
+    const finalStat = await fsp.stat(finalOutput);
+    return {
+      state: "uploaded",
+      storageUri: finalOutput,
+      manifestKey: manifestPath,
+      segmentCount: manifestSegments.length,
+      sizeBytes: finalStat.size
+    };
   }
 
   async startLiveComposeRecording({
@@ -444,6 +541,11 @@ class RecordingService {
     const isSegmentUploadMode = recordingMode === "segment_upload";
     const isSegmentLocalMode = recordingMode === "segment_local";
     const isChunkedSegmentMode = isSegmentUploadMode || isSegmentLocalMode;
+    const safeSessionId = String(sessionId || "unknown_session").replace(/[^a-zA-Z0-9_-]/g, "_");
+    const localRecordingDir = isSegmentLocalMode ? path.join(outputDir, safeSessionId, recordingId) : outputDir;
+    if (isSegmentLocalMode) {
+      await fsp.mkdir(localRecordingDir, { recursive: true });
+    }
     try {
       for (const participantId of participantIds) {
         const refs = mediaRefs
@@ -482,9 +584,18 @@ class RecordingService {
 
         const safeParticipantId = String(participantId || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
         const chunkFilePrefix = `${recordingId}_${safeParticipantId}_`;
-        const segmentFile = path.join(outputDir, `${recordingId}_${safeParticipantId}.webm`);
-        const chunkPattern = path.join(outputDir, `${chunkFilePrefix}%06d.webm`);
-        const sdpFile = path.join(outputDir, `${recordingId}_${safeParticipantId}.sdp`);
+        const participantBaseDir = isSegmentLocalMode
+          ? path.join(localRecordingDir, safeParticipantId)
+          : outputDir;
+        const participantChunkDir = isSegmentLocalMode
+          ? path.join(participantBaseDir, "chunks")
+          : outputDir;
+        if (isSegmentLocalMode) {
+          await fsp.mkdir(participantChunkDir, { recursive: true });
+        }
+        const segmentFile = path.join(participantBaseDir, `${recordingId}_${safeParticipantId}.webm`);
+        const chunkPattern = path.join(participantChunkDir, `${chunkFilePrefix}%06d.webm`);
+        const sdpFile = path.join(participantBaseDir, `${recordingId}_${safeParticipantId}.sdp`);
         const sdp = this.buildSdp(taps);
         await fsp.writeFile(sdpFile, sdp, "utf8");
         const segmentEngine = this.getSegmentRecordingEngine();
@@ -509,7 +620,7 @@ class RecordingService {
           engine: segmentEngine,
           getStderrTail,
           isChunked: isChunkedSegmentMode,
-          outputDir,
+          outputDir: participantChunkDir,
           chunkFilePrefix,
           loggedChunks: new Set(),
           uploadedChunks: new Set(),
@@ -583,6 +694,7 @@ class RecordingService {
         audioTapCount: segmentRecorders.reduce((sum, s) => sum + s.taps.filter((t) => t.kind === "audio").length, 0),
         videoTapCount: segmentRecorders.reduce((sum, s) => sum + s.taps.filter((t) => t.kind === "video").length, 0),
         _segments: segmentRecorders,
+        _localRecordingDir: isSegmentLocalMode ? localRecordingDir : "",
         _keyframeTimer: keyframeTimer,
         _chunkUploadTimer: chunkUploadTimer,
         _chunkLogTimer: chunkLogTimer,
@@ -713,6 +825,13 @@ class RecordingService {
         existingSegmentFiles.push(seg);
       } catch (_e) {}
     }
+    if (active._segments?.some((segment) => segment.isChunked)) {
+      const expectedChunks = Math.max(Math.ceil(durationMs / (this.getChunkSeconds() * 1000)), 1);
+      // eslint-disable-next-line no-console
+      console.log(
+        `[recording] chunk_summary session=${sessionId} recordingId=${active.recordingId} expectedChunks~=${expectedChunks} actualChunks=${existingSegmentFiles.length} durationMs=${durationMs}`
+      );
+    }
 
     const processing = {
       ...active,
@@ -729,6 +848,7 @@ class RecordingService {
     delete processing._segments;
     delete processing._keyframeTimer;
     delete processing._chunkLogTimer;
+    delete processing._localRecordingDir;
 
     this.activeBySession.delete(sessionId);
     this.upsertHistory(sessionId, processing);
@@ -789,21 +909,48 @@ class RecordingService {
     }
 
     if (this.getRecordingMode() === "segment_local") {
-      let totalSizeBytes = 0;
-      for (const seg of existingSegmentFiles) {
-        try {
-          const stat = await fsp.stat(seg.outputFile);
-          totalSizeBytes += stat.size;
-        } catch (_err) {}
-      }
-      const finished = {
+      const localUploading = {
         ...processing,
-        state: "stopped",
-        storageUri: this.config.outputDir || "recordings",
-        sizeBytes: totalSizeBytes
+        state: "uploading",
+        storageUri: ""
       };
-      this.upsertHistory(sessionId, finished);
-      return { ok: true, recording: this.toPublic(finished) };
+      this.upsertHistory(sessionId, localUploading);
+      if (typeof hooks.onUpdate === "function") {
+        await hooks.onUpdate(this.toPublic(localUploading));
+      }
+      try {
+        const finalized = await this.finalizeLocalChunkProcessing({
+          recording: {
+            ...this.toPublic(localUploading),
+            localRecordingDir: active._localRecordingDir || ""
+          },
+          segmentDetails: existingSegmentFiles
+        });
+        const finished = {
+          ...localUploading,
+          state: finalized?.state || "uploaded",
+          storageUri: finalized?.storageUri || "",
+          manifestKey: finalized?.manifestKey || "",
+          sizeBytes: Number.isFinite(finalized?.sizeBytes) ? finalized.sizeBytes : null,
+          segmentCount: Number.isFinite(finalized?.segmentCount) ? finalized.segmentCount : existingSegmentFiles.length
+        };
+        this.upsertHistory(sessionId, finished);
+        if (typeof hooks.onUpdate === "function") {
+          await hooks.onUpdate(this.toPublic(finished));
+        }
+        return { ok: true, recording: this.toPublic(finished) };
+      } catch (error) {
+        const failed = {
+          ...localUploading,
+          state: "failed",
+          mergeStderrTail: error.message || "local_chunk_finalize_failed"
+        };
+        this.upsertHistory(sessionId, failed);
+        if (typeof hooks.onUpdate === "function") {
+          await hooks.onUpdate(this.toPublic(failed));
+        }
+        return { ok: true, recording: this.toPublic(failed) };
+      }
     }
 
     if (existingSegmentFiles.length <= 1) {
@@ -963,10 +1110,22 @@ class RecordingService {
     }
     if (options.chunked) {
       const chunkSeconds = Number.parseInt(String(options.chunkSeconds || 5), 10);
+      const safeChunkSeconds = Number.isNaN(chunkSeconds) ? 5 : Math.max(chunkSeconds, 2);
+      if (hasVideo) {
+        const gop = Math.max(safeChunkSeconds * 30, 30);
+        args.push(
+          "-g", String(gop),
+          "-keyint_min", String(gop),
+          "-force_key_frames", `expr:gte(t,n_forced*${safeChunkSeconds})`
+        );
+      }
       args.push(
         "-f", "segment",
         "-segment_format", "webm",
-        "-segment_time", String(Number.isNaN(chunkSeconds) ? 5 : chunkSeconds),
+        "-segment_time", String(safeChunkSeconds),
+        "-break_non_keyframes", "1",
+        "-segment_time_delta", "0.2",
+        "-write_empty_segments", "1",
         "-reset_timestamps", "1",
         "-strftime", "0",
         outputFile
