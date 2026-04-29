@@ -49,14 +49,18 @@ class RecordingService {
     let finalOutputFile = active.storageUri;
     let mergeStderrTail = "";
     let finalState = "stopped";
+    const isMp4MergeMode = active.mode === "segment_merge_mp4";
 
     try {
-      if (existingSegmentFiles.length === 1) {
+      const shouldRunMerge = existingSegmentFiles.length > 1 || (isMp4MergeMode && existingSegmentFiles.length >= 1);
+      if (existingSegmentFiles.length === 1 && !isMp4MergeMode) {
         finalOutputFile = existingSegmentFiles[0].outputFile;
-      } else if (existingSegmentFiles.length > 1) {
+      } else if (shouldRunMerge) {
         const mergeCandidates = existingSegmentFiles.filter((seg) => seg.hasVideo);
         const mergeInputs = (mergeCandidates.length > 0 ? mergeCandidates : existingSegmentFiles).map((seg) => seg.outputFile);
-        const mergeArgs = this.buildMergeArgs(mergeInputs, finalOutputFile);
+        const mergeArgs = isMp4MergeMode
+          ? this.buildMergeArgsMp4(mergeInputs, finalOutputFile)
+          : this.buildMergeArgs(mergeInputs, finalOutputFile);
         const { proc: mergeFfmpeg, getStderrTail: getMergeStderrTail } = this.createProcess(this.config.ffmpegPath || "ffmpeg", mergeArgs);
         const mergeExitCode = await this.waitProcessExit(mergeFfmpeg, 45 * 60 * 1000);
         mergeStderrTail = getMergeStderrTail();
@@ -259,6 +263,7 @@ class RecordingService {
     if (mode === "live_compose") return "live_compose";
     if (mode === "segment_upload") return "segment_upload";
     if (mode === "segment_local") return "segment_local";
+    if (mode === "segment_merge_mp4") return "segment_merge_mp4";
     return "segment_merge";
   }
 
@@ -575,13 +580,15 @@ class RecordingService {
     const recordingId = `vc_rec_${uuidv7().replaceAll("-", "")}`;
     const outputDir = path.resolve(process.cwd(), this.config.outputDir || "recordings");
     await fsp.mkdir(outputDir, { recursive: true });
-    const outputFile = path.join(outputDir, `${recordingId}.webm`);
+    const recordingMode = this.getRecordingMode();
+    const isMp4MergeMode = recordingMode === "segment_merge_mp4";
+    const outputFile = path.join(outputDir, `${recordingId}.${isMp4MergeMode ? "mp4" : "webm"}`);
     const participantIds = Array.from(new Set(mediaRefs.map((ref) => ref.participantId)));
     const segmentRecorders = [];
     let nextPort = this.config.basePort || 50040;
     if (nextPort % 2 !== 0) nextPort += 1;
 
-    if (this.getRecordingMode() === "live_compose") {
+    if (recordingMode === "live_compose") {
       try {
         const sortedRefs = mediaRefs.slice().sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "video" ? -1 : 1));
         const liveRecording = await this.startLiveComposeRecording({
@@ -601,7 +608,6 @@ class RecordingService {
       }
     }
 
-    const recordingMode = this.getRecordingMode();
     const isSegmentUploadMode = recordingMode === "segment_upload";
     const isSegmentLocalMode = recordingMode === "segment_local";
     const isChunkedSegmentMode = isSegmentUploadMode || isSegmentLocalMode;
@@ -739,6 +745,7 @@ class RecordingService {
         recordingId,
         sessionId,
         engine: this.getSegmentRecordingEngine(),
+        mode: recordingMode,
         state: "recording",
         storageUri: outputFile,
         startedAt,
@@ -907,10 +914,14 @@ class RecordingService {
       );
     }
 
+    const isMp4MergeMode = active.mode === "segment_merge_mp4";
+    const willRunMerge = existingSegmentFiles.length > 1 || (isMp4MergeMode && existingSegmentFiles.length >= 1);
     const processing = {
       ...active,
-      state: existingSegmentFiles.length > 1 ? "processing" : "stopped",
-      storageUri: existingSegmentFiles.length === 1 ? existingSegmentFiles[0].outputFile : active.storageUri,
+      state: willRunMerge ? "processing" : "stopped",
+      storageUri: !isMp4MergeMode && existingSegmentFiles.length === 1
+        ? existingSegmentFiles[0].outputFile
+        : active.storageUri,
       stoppedAt,
       durationMs,
       stoppedBy,
@@ -1030,7 +1041,7 @@ class RecordingService {
       }
     }
 
-    if (existingSegmentFiles.length <= 1) {
+    if (!willRunMerge) {
       let sizeBytes = null;
       try {
         const stat = await fsp.stat(processing.storageUri);
@@ -1381,6 +1392,54 @@ class RecordingService {
       args.push("-map", "[aout]", "-c:a", "libopus", "-b:a", "64k");
     }
     args.push("-f", "webm", outputFile);
+    return args;
+  }
+
+  buildMergeArgsMp4(inputFiles, outputFile) {
+    const args = ["-loglevel", "warning"];
+    for (const input of inputFiles) {
+      args.push("-i", input);
+    }
+    const videoCount = inputFiles.length;
+    const audioCount = inputFiles.length;
+    const filters = [];
+    if (videoCount === 1) {
+      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
+    } else if (videoCount === 2) {
+      filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v0]");
+      filters.push("[1:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v1]");
+      filters.push("[v0][v1]hstack=inputs=2:shortest=0[vout]");
+    } else {
+      const capped = Math.min(videoCount, 4);
+      for (let i = 0; i < capped; i += 1) {
+        filters.push(`[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fifo[v${i}]`);
+      }
+      const joined = Array.from({ length: capped }, (_v, i) => `[v${i}]`).join("");
+      const layout = capped === 3 ? "0_0|640_0|0_360" : "0_0|640_0|0_360|640_360";
+      filters.push(`${joined}xstack=inputs=${capped}:layout=${layout}:fill=black:shortest=0[vout]`);
+    }
+    if (audioCount > 0) {
+      const cappedAudio = Math.min(audioCount, 6);
+      const audioPrep = Array.from({ length: cappedAudio }, (_v, i) => `[${i}:a]aresample=async=1:first_pts=0[a${i}]`).join(";");
+      filters.push(`${audioPrep};${Array.from({ length: cappedAudio }, (_v, i) => `[a${i}]`).join("")}amix=inputs=${cappedAudio}:duration=longest:dropout_transition=2[aout]`);
+    }
+    args.push("-filter_complex", filters.join(";"));
+    const preset = String(this.config.mp4Preset || "veryfast");
+    const crf = String(this.config.mp4Crf || 23);
+    args.push(
+      "-map", "[vout]",
+      "-c:v", "libx264",
+      "-preset", preset,
+      "-crf", crf,
+      "-pix_fmt", "yuv420p",
+      "-profile:v", "high",
+      "-level", "4.0"
+    );
+    if (audioCount > 0) {
+      const audioBitrate = String(this.config.mp4AudioBitrate || "128k");
+      args.push("-map", "[aout]", "-c:a", "aac", "-b:a", audioBitrate);
+    }
+    args.push("-movflags", "+faststart", "-f", "mp4", outputFile);
     return args;
   }
 
