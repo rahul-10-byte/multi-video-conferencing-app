@@ -42,7 +42,6 @@ app.use((req, res, next) => {
   const startMs = Date.now();
   res.on("finish", () => {
     const durationMs = Date.now() - startMs;
-    // eslint-disable-next-line no-console
     console.log(
       `[http] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${durationMs}ms) ip=${req.ip || req.socket?.remoteAddress || "unknown"}`
     );
@@ -75,7 +74,6 @@ let reconnectWorkerRunning = false;
 
 function requireApiKey(req, res, next) {
   if (!config.apiKey) {
-    // eslint-disable-next-line no-console
     console.log(`[auth] api key disabled -> allow ${req.method} ${req.originalUrl}`);
     next();
     return;
@@ -85,14 +83,12 @@ function requireApiKey(req, res, next) {
   const apiKey = req.headers["x-api-key"] || bearer;
   if (apiKey !== config.apiKey) {
     const reason = apiKey ? "mismatch" : "missing";
-    // eslint-disable-next-line no-console
     console.log(
       `[auth] rejected ${req.method} ${req.originalUrl} reason=${reason} ip=${req.ip || req.socket?.remoteAddress || "unknown"}`
     );
     res.status(401).json({ error: "unauthorized" });
     return;
   }
-  // eslint-disable-next-line no-console
   console.log(`[auth] accepted ${req.method} ${req.originalUrl}`);
   next();
 }
@@ -525,7 +521,6 @@ async function start() {
   tokenService = new TokenService(config, replayStore);
   readModel = new PostgresReadModel(config.db);
   await readModel.connect();
-  // eslint-disable-next-line no-console
   console.log(readModel.enabled ? "postgres read model connected" : "postgres read model disabled");
   eventBus = new EventBus({ readModel });
 
@@ -545,13 +540,11 @@ async function start() {
     Math.max(config.reconnectCleanupPollSeconds, 1) * 1000
   );
   server.listen(config.port, () => {
-    // eslint-disable-next-line no-console
     console.log(`vc-backend listening on ${config.baseUrl}`);
   });
 }
 
 start().catch((error) => {
-  // eslint-disable-next-line no-console
   console.error("failed_to_start", error);
   process.exit(1);
 });

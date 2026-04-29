@@ -284,7 +284,6 @@ class RecordingService {
       if (pendingLogFiles.length === 0) continue;
       for (const file of pendingLogFiles) {
         segment.loggedChunks.add(file);
-        // eslint-disable-next-line no-console
         console.log(
           `[recording] chunk_ready session=${recording.sessionId} recordingId=${recording.recordingId} participant=${segment.participantId} file=${path.basename(file)}`
         );
@@ -406,11 +405,6 @@ class RecordingService {
         rtpCapabilities: room.router.rtpCapabilities,
         paused: true
       });
-      if (ref.kind === "video" && typeof consumer.setPreferredLayers === "function") {
-        try {
-          await consumer.setPreferredLayers({ spatialLayer: 0, temporalLayer: 2 });
-        } catch (_err) {}
-      }
       taps.push({
         kind: ref.kind,
         participantId: ref.participantId,
@@ -433,11 +427,14 @@ class RecordingService {
         : this.buildFfmpegArgs(taps, sdpFile, outputFile);
     const { proc, getStderrTail } = this.createProcess(processBinary, processArgs);
 
-    setTimeout(async () => {
+    const warmupTimer = setTimeout(async () => {
       for (const tap of taps) {
         try {
           await tap.consumer.resume();
         } catch (_err) {}
+        if (tap.kind === "video" && tap.consumer && typeof tap.consumer.requestKeyFrame === "function") {
+          try { await tap.consumer.requestKeyFrame(); } catch (_e) {}
+        }
       }
     }, this.config.keyframeWarmupMs || 1500);
 
@@ -481,12 +478,12 @@ class RecordingService {
       _liveSdpFile: sdpFile,
       _liveGetStderrTail: getStderrTail,
       _keyframeTimer: keyframeTimer,
+      _warmupTimer: warmupTimer,
       _stopping: false
     };
 
     proc.on("exit", (code) => {
       if (!recording._stopping && code !== 0 && code !== null) {
-        // eslint-disable-next-line no-console
         console.error(`recording_live_compose_exit_nonzero session=${sessionId} code=${code} detail=${getStderrTail()}`);
       }
     });
@@ -565,11 +562,6 @@ class RecordingService {
             rtpCapabilities: room.router.rtpCapabilities,
             paused: true
           });
-          if (ref.kind === "video" && typeof consumer.setPreferredLayers === "function") {
-            try {
-              await consumer.setPreferredLayers({ spatialLayer: 0, temporalLayer: 2 });
-            } catch (_err) {}
-          }
           taps.push({
             kind: ref.kind,
             participantId: ref.participantId,
@@ -628,12 +620,15 @@ class RecordingService {
         });
       }
 
-      setTimeout(async () => {
+      const warmupTimer = setTimeout(async () => {
         for (const segment of segmentRecorders) {
           for (const tap of segment.taps) {
             try {
               await tap.consumer.resume();
             } catch (_err) {}
+            if (tap.kind === "video" && tap.consumer && typeof tap.consumer.requestKeyFrame === "function") {
+              try { await tap.consumer.requestKeyFrame(); } catch (_e) {}
+            }
           }
         }
       }, this.config.keyframeWarmupMs || 1500);
@@ -643,11 +638,6 @@ class RecordingService {
         for (const segment of segmentRecorders) {
           for (const tap of segment.taps) {
             if (tap.kind !== "video") continue;
-            if (tap.consumer && typeof tap.consumer.setPreferredLayers === "function") {
-              try {
-                await tap.consumer.setPreferredLayers({ spatialLayer: 0, temporalLayer: 2 });
-              } catch (_err) {}
-            }
             try {
               if (tap.consumer && typeof tap.consumer.requestKeyFrame === "function") {
                 await tap.consumer.requestKeyFrame();
@@ -696,6 +686,7 @@ class RecordingService {
         _segments: segmentRecorders,
         _localRecordingDir: isSegmentLocalMode ? localRecordingDir : "",
         _keyframeTimer: keyframeTimer,
+        _warmupTimer: warmupTimer,
         _chunkUploadTimer: chunkUploadTimer,
         _chunkLogTimer: chunkLogTimer,
         _stopping: false
@@ -703,7 +694,6 @@ class RecordingService {
       for (const segment of segmentRecorders) {
         segment.ffmpeg.on("exit", (code) => {
           if (!recording._stopping && code !== 0 && code !== null) {
-            // eslint-disable-next-line no-console
             console.error(
               `recording_ffmpeg_exit_nonzero session=${sessionId} participant=${segment.participantId} code=${code} detail=${segment.getStderrTail()}`
             );
@@ -739,6 +729,9 @@ class RecordingService {
 
     if (active._keyframeTimer) {
       clearInterval(active._keyframeTimer);
+    }
+    if (active._warmupTimer) {
+      clearTimeout(active._warmupTimer);
     }
     if (active._chunkUploadTimer) {
       clearInterval(active._chunkUploadTimer);
@@ -777,6 +770,7 @@ class RecordingService {
       delete finished._liveSdpFile;
       delete finished._liveGetStderrTail;
       delete finished._keyframeTimer;
+      delete finished._warmupTimer;
       this.activeBySession.delete(sessionId);
       this.upsertHistory(sessionId, finished);
       return { ok: true, recording: this.toPublic(finished) };
@@ -827,7 +821,6 @@ class RecordingService {
     }
     if (active._segments?.some((segment) => segment.isChunked)) {
       const expectedChunks = Math.max(Math.ceil(durationMs / (this.getChunkSeconds() * 1000)), 1);
-      // eslint-disable-next-line no-console
       console.log(
         `[recording] chunk_summary session=${sessionId} recordingId=${active.recordingId} expectedChunks~=${expectedChunks} actualChunks=${existingSegmentFiles.length} durationMs=${durationMs}`
       );
@@ -847,6 +840,8 @@ class RecordingService {
     };
     delete processing._segments;
     delete processing._keyframeTimer;
+    delete processing._warmupTimer;
+    delete processing._chunkUploadTimer;
     delete processing._chunkLogTimer;
     delete processing._localRecordingDir;
 
@@ -1014,11 +1009,11 @@ class RecordingService {
     const args = [
       "-loglevel", "warning",
       "-protocol_whitelist", "file,udp,rtp",
-      "-fflags", "+genpts+discardcorrupt",
+      "-fflags", "+discardcorrupt",
       "-use_wallclock_as_timestamps", "1",
-      "-analyzeduration", "10000000",
-      "-probesize", "50000000",
-      "-max_delay", "20000000",
+      "-analyzeduration", "1000000",
+      "-probesize", "1000000",
+      "-max_delay", "1000000",
       "-f", "sdp",
       "-i", sdpFile
     ];
@@ -1026,32 +1021,43 @@ class RecordingService {
     const audioCount = taps.filter((t) => t.kind === "audio").length;
     const filters = [];
 
-    // For the common 1:1 session recording, keep RTP packets as-is.
-    // This avoids decode/re-encode stalls and preserves call timing better.
+    // For the common 1:1 session recording, keep RTP packets as-is —
+    // but only when the negotiated codecs are WebM-compatible. If the
+    // router negotiated H.264 / non-Opus audio, fall through to transcode.
     if (videoCount <= 1 && audioCount <= 1) {
-      if (videoCount > 0) {
-        args.push("-map", "0:v:0", "-c:v", "copy");
+      const videoTap = taps.find((t) => t.kind === "video");
+      const audioTap = taps.find((t) => t.kind === "audio");
+      const videoMime = String(videoTap?.consumer?.rtpParameters?.codecs?.[0]?.mimeType || "").toLowerCase();
+      const audioMime = String(audioTap?.consumer?.rtpParameters?.codecs?.[0]?.mimeType || "").toLowerCase();
+      const videoCopyOk = !videoTap || /^video\/(vp8|vp9|av1)$/.test(videoMime);
+      const audioCopyOk = !audioTap || /^audio\/(opus|vorbis)$/.test(audioMime);
+      if (videoCopyOk && audioCopyOk) {
+        if (videoCount > 0) {
+          args.push("-map", "0:v:0", "-c:v", "copy");
+        }
+        if (audioCount > 0) {
+          args.push("-map", "0:a:0", "-c:a", "copy");
+        }
+        args.push("-f", "webm", outputFile);
+        return args;
       }
-      if (audioCount > 0) {
-        args.push("-map", "0:a:0", "-c:a", "copy");
-      }
-      args.push("-f", "webm", outputFile);
-      return args;
     }
 
     if (videoCount > 0) {
       if (videoCount === 1) {
         filters.push("[0:v:0]setpts=PTS-STARTPTS,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
       } else if (videoCount === 2) {
-        // Normalize timestamps/cadence per input before stacking to keep
-        // two-party recordings stable over longer sessions.
         filters.push("[0:v:0]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v0]");
         filters.push("[0:v:1]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,fifo[v1]");
         filters.push("[v0][v1]hstack=inputs=2[vout]");
       } else {
-        // For >2 videos, prefer a stable representative feed over fragile
-        // large mosaics in the current recorder path.
-        filters.push("[0:v:0]setpts=PTS-STARTPTS,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
+        const capped = Math.min(videoCount, 4);
+        for (let i = 0; i < capped; i += 1) {
+          filters.push(`[0:v:${i}]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fifo[v${i}]`);
+        }
+        const joined = Array.from({ length: capped }, (_v, i) => `[v${i}]`).join("");
+        const layout = capped === 3 ? "0_0|640_0|0_360" : "0_0|640_0|0_360|640_360";
+        filters.push(`${joined}xstack=inputs=${capped}:layout=${layout}:fill=black:shortest=0[vout]`);
       }
     }
 
@@ -1082,11 +1088,11 @@ class RecordingService {
     const args = [
       "-loglevel", "warning",
       "-protocol_whitelist", "file,udp,rtp",
-      "-fflags", "+genpts+discardcorrupt",
+      "-fflags", "+discardcorrupt",
       "-use_wallclock_as_timestamps", "1",
-      "-analyzeduration", "10000000",
-      "-probesize", "50000000",
-      "-max_delay", "20000000",
+      "-analyzeduration", "1000000",
+      "-probesize", "1000000",
+      "-max_delay", "1000000",
       "-f", "sdp",
       "-i", sdpFile
     ];

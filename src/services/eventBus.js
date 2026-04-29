@@ -13,13 +13,11 @@ class EventBus {
       ...payload
     };
     // JSON line for ingest by log pipeline.
-    // eslint-disable-next-line no-console
     console.log(`EVENT_JSON: ${JSON.stringify(envelope)}`);
     if (this.readModel) {
       try {
         await this.readModel.persistEvent(envelope);
       } catch (error) {
-        // eslint-disable-next-line no-console
         console.error("read_model_persist_failed", error?.message || error);
       }
     }

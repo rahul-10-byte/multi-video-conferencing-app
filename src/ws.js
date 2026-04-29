@@ -121,7 +121,6 @@ function setupWebSocketServer({
 
   wss.on("connection", (ws) => {
     send(ws, "connected", { version: "v1" });
-    // eslint-disable-next-line no-console
     console.log("[ws] client_connected");
 
     ws.on("message", async (rawData) => {
@@ -136,7 +135,6 @@ function setupWebSocketServer({
       try {
         const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
         if (config.wsVerboseLogs) {
-          // eslint-disable-next-line no-console
           console.log(
             `[ws] recv event=${msg?.event || "unknown"} requestId=${requestId || "none"} session=${ws.sessionId || "n/a"} participant=${ws.participantId || "n/a"}`
           );
@@ -202,7 +200,6 @@ function setupWebSocketServer({
             role: claims.role,
             routerRtpCapabilities: mediasoupService.getRouterRtpCapabilities(claims.sid)
           }, requestId);
-          // eslint-disable-next-line no-console
           console.log(`[ws] joined session=${claims.sid} participant=${claims.sub} role=${claims.role}`);
           return;
         }
@@ -229,7 +226,6 @@ function setupWebSocketServer({
                 })
                 .join(",")
             : "none";
-          // eslint-disable-next-line no-console
           console.log(
             `[ws] transport_created session=${ws.sessionId} participant=${ws.participantId} direction=${direction} transportId=${transport.id} candidates=${candidateSummary}`
           );
@@ -245,7 +241,6 @@ function setupWebSocketServer({
           const transportId = msg?.data?.transportId;
           const dtlsParameters = msg?.data?.dtlsParameters;
           await mediasoupService.connectTransport(ws.sessionId, ws.participantId, transportId, dtlsParameters);
-          // eslint-disable-next-line no-console
           console.log(
             `[ws] transport_connected session=${ws.sessionId} participant=${ws.participantId} transportId=${transportId}`
           );
@@ -268,7 +263,6 @@ function setupWebSocketServer({
             kind,
             rtpParameters
           );
-          // eslint-disable-next-line no-console
           console.log(
             `[ws] produced session=${ws.sessionId} participant=${ws.participantId} transportId=${transportId} kind=${kind} producerId=${produced.producerId}`
           );
@@ -291,7 +285,6 @@ function setupWebSocketServer({
             producerId,
             rtpCapabilities
           );
-          // eslint-disable-next-line no-console
           console.log(
             `[ws] consumed session=${ws.sessionId} participant=${ws.participantId} transportId=${transportId} producerId=${producerId} consumerId=${consumed.consumerId}`
           );
@@ -432,7 +425,6 @@ function setupWebSocketServer({
       } catch (error) {
         backendErrorsTotal.inc({ area: "ws_message_handler" });
         const requestId = typeof msg?.requestId === "string" ? msg.requestId : undefined;
-        // eslint-disable-next-line no-console
         console.error(
           `[ws] handler_error event=${msg?.event || "unknown"} requestId=${requestId || "none"} session=${ws.sessionId || "n/a"} participant=${ws.participantId || "n/a"} error=${error.message}`
         );
@@ -441,7 +433,6 @@ function setupWebSocketServer({
     });
 
     ws.on("close", async () => {
-      // eslint-disable-next-line no-console
       console.log(`[ws] client_closed session=${ws.sessionId || "n/a"} participant=${ws.participantId || "n/a"}`);
       if (ws.sessionId && ws.participantId) {
         removeSocketFromSession(ws.sessionId, ws);
