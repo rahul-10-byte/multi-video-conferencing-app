@@ -882,8 +882,6 @@ export default function App() {
   const [availableCameras, setAvailableCameras] = useState([]);
   const cameraIndexRef = useRef(0);
   const selectedCameraDeviceIdRef = useRef('');
-  const lastCameraFingerprintRef = useRef('');
-  const cachedFacingCamerasRef = useRef(null);
   const [micIndex, setMicIndex] = useState(0);
   const availableMicsRef = useRef([]);
   const [availableMics, setAvailableMics] = useState([]);
@@ -973,47 +971,7 @@ export default function App() {
     const devices = await navigator.mediaDevices.enumerateDevices();
 
     const camerasFull = devices.filter((device) => device.kind === 'videoinput');
-
-    let cameras = camerasFull;
-    if (camerasFull.length > 2) {
-      const fingerprint = camerasFull.map((c) => c.deviceId).join('|');
-      if (lastCameraFingerprintRef.current !== fingerprint || !cachedFacingCamerasRef.current) {
-        lastCameraFingerprintRef.current = fingerprint;
-
-        const getDeviceIdForFacing = async (facingMode) => {
-          try {
-            const probeStream = await navigator.mediaDevices.getUserMedia({
-              audio: false,
-              video: { facingMode },
-            });
-            const [track] = probeStream.getVideoTracks();
-            const deviceId = track?.getSettings?.().deviceId;
-            probeStream.getTracks().forEach((t) => t.stop());
-            return deviceId || null;
-          } catch (_error) {
-            return null;
-          }
-        };
-
-        const [frontDeviceId, rearDeviceId] = await Promise.all([getDeviceIdForFacing('user'), getDeviceIdForFacing('environment')]);
-
-        const guessByLabel = (needle) => camerasFull.find((c) => String(c.label || '').toLowerCase().includes(needle))?.deviceId || null;
-        const frontId = frontDeviceId || guessByLabel('front');
-        const rearId = rearDeviceId || guessByLabel('back');
-
-        const grouped = [];
-        const frontCam = frontId ? camerasFull.find((c) => c.deviceId === frontId) : null;
-        const rearCam = rearId ? camerasFull.find((c) => c.deviceId === rearId) : null;
-
-        if (frontCam) grouped.push({ ...frontCam, label: frontCam.label ? `Front Camera` : `Front Camera` });
-        if (rearCam && rearCam.deviceId !== frontCam?.deviceId) grouped.push({ ...rearCam, label: rearCam.label ? `Back Camera` : `Back Camera` });
-
-        cameras = grouped.length > 0 ? grouped : camerasFull;
-        cachedFacingCamerasRef.current = cameras;
-      } else if (cachedFacingCamerasRef.current?.length) {
-        cameras = cachedFacingCamerasRef.current;
-      }
-    }
+    const cameras = camerasFull;
 
     availableCamerasRef.current = cameras;
     setAvailableCameras(cameras);
@@ -1038,13 +996,6 @@ export default function App() {
     cameraIndexRef.current = resolvedIdx;
     selectedCameraDeviceIdRef.current = cameras?.[resolvedIdx]?.deviceId || '';
     setCameraIndex(resolvedIdx);
-
-    // Keep `cameraFacing` in sync with the grouped list order (front first, back second).
-    if (cameras.length >= 2) {
-      setCameraFacing(resolvedIdx === 1 ? 'rear' : 'front');
-    } else {
-      setCameraFacing('front');
-    }
     return cameras;
   }
 
@@ -1704,11 +1655,6 @@ export default function App() {
     cameraIndexRef.current = resolvedIndex;
     setCameraIndex(resolvedIndex);
     selectedCameraDeviceIdRef.current = deviceId;
-    if (cameras.length >= 2) {
-      setCameraFacing(resolvedIndex === 1 ? 'rear' : 'front');
-    } else {
-      setCameraFacing('front');
-    }
 
     // If video is currently off (producer closed), just update the selection.
     if (!videoProducerRef.current) return;
@@ -1722,12 +1668,50 @@ export default function App() {
           video: { deviceId: { exact: deviceId } },
         });
       } catch (_error1) {
-        // Some mobile browsers don't support `deviceId: { exact }`. Fall back to facingMode.
-        const facingMode = cameras.length >= 2 && resolvedIndex === 1 ? 'environment' : 'user';
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: { facingMode },
-        });
+        // Some mobile browsers don't fully support `deviceId: { exact }`.
+        // Probe both facingModes and pick the one that matches the chosen deviceId if possible.
+        const tryFacingMode = async (facingMode) => {
+          try {
+            const probeStream = await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: { facingMode },
+            });
+            const [track] = probeStream.getVideoTracks();
+            const probeDeviceId = track?.getSettings?.().deviceId;
+            return { probeStream, probeDeviceId };
+          } catch (_probeError) {
+            return null;
+          }
+        };
+
+        const [userProbe, envProbe] = await Promise.all([tryFacingMode('user'), tryFacingMode('environment')]);
+
+        const chosenProbe =
+          (userProbe && userProbe.probeDeviceId === deviceId && userProbe) ||
+          (envProbe && envProbe.probeDeviceId === deviceId && envProbe) ||
+          userProbe ||
+          envProbe;
+
+        if (!chosenProbe) {
+          throw new Error('camera_switch_failed');
+        }
+
+        if (userProbe && userProbe !== chosenProbe) {
+          try {
+            userProbe.probeStream.getTracks().forEach((t) => t.stop());
+          } catch (_stopError) {
+            // Ignore cleanup errors.
+          }
+        }
+        if (envProbe && envProbe !== chosenProbe) {
+          try {
+            envProbe.probeStream.getTracks().forEach((t) => t.stop());
+          } catch (_stopError) {
+            // Ignore cleanup errors.
+          }
+        }
+
+        stream = chosenProbe.probeStream;
       }
       const [newTrack] = stream.getVideoTracks();
       if (!newTrack) throw new Error('camera_track_missing');
