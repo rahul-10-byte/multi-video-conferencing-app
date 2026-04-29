@@ -279,7 +279,7 @@ function RemoteAudio({ stream }) {
   return <audio ref={audioRef} autoPlay playsInline />;
 }
 
-function PillDeviceDropdown({ options, selectedDeviceId, disabled, placeholder, onSelect }) {
+function PillDeviceDropdown({ options, selectedDeviceId, disabled, placeholder, onSelect, menuAlign = 'right' }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
 
@@ -318,7 +318,11 @@ function PillDeviceDropdown({ options, selectedDeviceId, disabled, placeholder, 
       </button>
 
       {open ? (
-        <div className="pill-dropdown__menu" role="menu" aria-label={placeholder}>
+        <div
+          className={`pill-dropdown__menu ${menuAlign === 'left' ? 'pill-dropdown__menu--left' : 'pill-dropdown__menu--right'}`}
+          role="menu"
+          aria-label={placeholder}
+        >
           {hasOptions ? (
             options.map((opt) => {
               const label = opt.label || opt.kindLabel || `Device (${String(opt.deviceId).slice(0, 6)})`;
@@ -736,6 +740,7 @@ function MeetingScreen({
                   disabled={reconnecting || deviceBusy || !availableMics || availableMics.length === 0}
                   placeholder="Select microphone"
                   onSelect={(deviceId) => onSelectMicrophoneDevice(deviceId)}
+                  menuAlign="left"
                 />
               </div>
 
@@ -877,6 +882,8 @@ export default function App() {
   const [availableCameras, setAvailableCameras] = useState([]);
   const cameraIndexRef = useRef(0);
   const selectedCameraDeviceIdRef = useRef('');
+  const lastCameraFingerprintRef = useRef('');
+  const cachedFacingCamerasRef = useRef(null);
   const [micIndex, setMicIndex] = useState(0);
   const availableMicsRef = useRef([]);
   const [availableMics, setAvailableMics] = useState([]);
@@ -964,7 +971,50 @@ export default function App() {
 
   async function refreshVideoDevices(stream = localStream) {
     const devices = await navigator.mediaDevices.enumerateDevices();
-    const cameras = devices.filter((device) => device.kind === 'videoinput');
+
+    const camerasFull = devices.filter((device) => device.kind === 'videoinput');
+
+    let cameras = camerasFull;
+    if (camerasFull.length > 2) {
+      const fingerprint = camerasFull.map((c) => c.deviceId).join('|');
+      if (lastCameraFingerprintRef.current !== fingerprint || !cachedFacingCamerasRef.current) {
+        lastCameraFingerprintRef.current = fingerprint;
+
+        const getDeviceIdForFacing = async (facingMode) => {
+          try {
+            const probeStream = await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: { facingMode },
+            });
+            const [track] = probeStream.getVideoTracks();
+            const deviceId = track?.getSettings?.().deviceId;
+            probeStream.getTracks().forEach((t) => t.stop());
+            return deviceId || null;
+          } catch (_error) {
+            return null;
+          }
+        };
+
+        const [frontDeviceId, rearDeviceId] = await Promise.all([getDeviceIdForFacing('user'), getDeviceIdForFacing('environment')]);
+
+        const guessByLabel = (needle) => camerasFull.find((c) => String(c.label || '').toLowerCase().includes(needle))?.deviceId || null;
+        const frontId = frontDeviceId || guessByLabel('front');
+        const rearId = rearDeviceId || guessByLabel('back');
+
+        const grouped = [];
+        const frontCam = frontId ? camerasFull.find((c) => c.deviceId === frontId) : null;
+        const rearCam = rearId ? camerasFull.find((c) => c.deviceId === rearId) : null;
+
+        if (frontCam) grouped.push({ ...frontCam, label: frontCam.label ? `Front Camera` : `Front Camera` });
+        if (rearCam && rearCam.deviceId !== frontCam?.deviceId) grouped.push({ ...rearCam, label: rearCam.label ? `Back Camera` : `Back Camera` });
+
+        cameras = grouped.length > 0 ? grouped : camerasFull;
+        cachedFacingCamerasRef.current = cameras;
+      } else if (cachedFacingCamerasRef.current?.length) {
+        cameras = cachedFacingCamerasRef.current;
+      }
+    }
+
     availableCamerasRef.current = cameras;
     setAvailableCameras(cameras);
     const currentTrack = stream?.getVideoTracks?.()[0];
@@ -988,6 +1038,13 @@ export default function App() {
     cameraIndexRef.current = resolvedIdx;
     selectedCameraDeviceIdRef.current = cameras?.[resolvedIdx]?.deviceId || '';
     setCameraIndex(resolvedIdx);
+
+    // Keep `cameraFacing` in sync with the grouped list order (front first, back second).
+    if (cameras.length >= 2) {
+      setCameraFacing(resolvedIdx === 1 ? 'rear' : 'front');
+    } else {
+      setCameraFacing('front');
+    }
     return cameras;
   }
 
@@ -1647,6 +1704,11 @@ export default function App() {
     cameraIndexRef.current = resolvedIndex;
     setCameraIndex(resolvedIndex);
     selectedCameraDeviceIdRef.current = deviceId;
+    if (cameras.length >= 2) {
+      setCameraFacing(resolvedIndex === 1 ? 'rear' : 'front');
+    } else {
+      setCameraFacing('front');
+    }
 
     // If video is currently off (producer closed), just update the selection.
     if (!videoProducerRef.current) return;
