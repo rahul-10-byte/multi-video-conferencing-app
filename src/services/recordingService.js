@@ -984,6 +984,10 @@ class RecordingService {
         }
         return { ok: true, recording: this.toPublic(finished) };
       } catch (error) {
+        console.error(
+          `[recording] upload_finalize_failed mode=segment_upload session=${sessionId} recordingId=${active.recordingId} error=${error?.message || String(error)}`,
+          error?.stack || ""
+        );
         const failed = {
           ...uploading,
           state: "failed",
@@ -1092,6 +1096,10 @@ class RecordingService {
         }
         return { ok: true, recording: this.toPublic(finished) };
       } catch (error) {
+        console.error(
+          `[recording] upload_finalize_failed mode=segment_upload_mp4 session=${sessionId} recordingId=${active.recordingId} error=${error?.message || String(error)}`,
+          error?.stack || ""
+        );
         const failed = {
           ...uploading,
           state: "failed",

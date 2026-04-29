@@ -36,12 +36,19 @@ class RecordingPipelineService {
   async uploadFile(localPath, key) {
     if (!this.s3) throw new Error("recording_s3_not_configured");
     const body = await fsp.readFile(localPath);
-    await this.s3.send(new PutObjectCommand({
-      Bucket: this.bucket,
-      Key: key,
-      Body: body,
-      ContentType: "video/webm"
-    }));
+    try {
+      await this.s3.send(new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: body,
+        ContentType: "video/webm"
+      }));
+    } catch (error) {
+      console.error(
+        `[recording] s3_upload_failed bucket=${this.bucket} key=${key} localPath=${localPath} error=${error?.name || "Error"}: ${error?.message || String(error)}`
+      );
+      throw error;
+    }
   }
 
   async uploadChunkFiles({ recording, segmentDetails = [] }) {
@@ -78,12 +85,19 @@ class RecordingPipelineService {
 
   async uploadJson(key, data) {
     if (!this.s3) throw new Error("recording_s3_not_configured");
-    await this.s3.send(new PutObjectCommand({
-      Bucket: this.bucket,
-      Key: key,
-      Body: JSON.stringify(data, null, 2),
-      ContentType: "application/json"
-    }));
+    try {
+      await this.s3.send(new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: JSON.stringify(data, null, 2),
+        ContentType: "application/json"
+      }));
+    } catch (error) {
+      console.error(
+        `[recording] s3_manifest_upload_failed bucket=${this.bucket} key=${key} error=${error?.name || "Error"}: ${error?.message || String(error)}`
+      );
+      throw error;
+    }
   }
 
   async finalizeAndTrigger({ recording, segmentDetails = [] }) {
@@ -139,11 +153,18 @@ class RecordingPipelineService {
         recordingId: recording.recordingId,
         sessionId: recording.sessionId
       };
-      await this.lambda.send(new InvokeCommand({
-        FunctionName: this.processingLambdaName,
-        InvocationType: "Event",
-        Payload: Buffer.from(JSON.stringify(payload))
-      }));
+      try {
+        await this.lambda.send(new InvokeCommand({
+          FunctionName: this.processingLambdaName,
+          InvocationType: "Event",
+          Payload: Buffer.from(JSON.stringify(payload))
+        }));
+      } catch (error) {
+        console.error(
+          `[recording] lambda_invoke_failed function=${this.processingLambdaName} sessionId=${recording.sessionId} recordingId=${recording.recordingId} error=${error?.name || "Error"}: ${error?.message || String(error)}`
+        );
+        throw error;
+      }
     }
 
     return {

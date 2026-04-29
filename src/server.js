@@ -364,12 +364,16 @@ app.post("/v1/sessions/:sessionId/recording/stop", requireApiKey, async (req, re
             : recording.state === "uploaded"
               ? "recording_uploaded"
               : "recording_stopped";
-      await eventBus.emit(eventName, {
+      const eventPayload = {
         sessionId,
         recordingId: recording.recordingId,
         stoppedBy,
         durationMs: recording.durationMs
-      });
+      };
+      if (recording.state === "failed" && recording.mergeStderrTail) {
+        eventPayload.reason = String(recording.mergeStderrTail).slice(0, 500);
+      }
+      await eventBus.emit(eventName, eventPayload);
     },
     onUploadFinalize: async ({ recording, segmentDetails }) => {
       if (!recordingPipelineService.isEnabled()) {
