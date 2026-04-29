@@ -478,6 +478,14 @@ setInterval(() => {
   replayStore.sweep();
 }, Math.max(config.replayCacheSweepSeconds, 5) * 1000);
 
+const timerLogIntervalMs = Math.max(Number.parseInt(String(config.timerLogIntervalMs || 10000), 10) || 10000, 1000);
+if (config.timerLogs !== false) {
+  setInterval(() => {
+    try { sessionStore.logActiveSessionTimers(); } catch (_e) {}
+    try { recordingService.logActiveRecordingTimers(); } catch (_e) {}
+  }, timerLogIntervalMs);
+}
+
 async function processReconnectTimeouts() {
   if (reconnectWorkerRunning) return;
   reconnectWorkerRunning = true;

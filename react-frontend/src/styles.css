@@ -200,6 +200,47 @@ select {
   color: #7f1d1d;
 }
 
+.timer-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.06);
+  color: #1e293b;
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.timer-pill--recording {
+  background: rgba(220, 38, 38, 0.12);
+  color: #b91c1c;
+  border: 1px solid rgba(220, 38, 38, 0.25);
+}
+
+.timer-pill__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.timer-pill__dot--call {
+  background: #2563eb;
+}
+
+.timer-pill__dot--recording {
+  background: #dc2626;
+  animation: timer-pill-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes timer-pill-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.8); }
+}
+
 .status-pill,
 .ghost-button,
 .primary-button,

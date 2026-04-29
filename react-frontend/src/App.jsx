@@ -4,6 +4,26 @@ import { buildWsUrl, normalizeBackendUrl, requestJson, slugifyParticipantId } fr
 
 const initialMessages = [];
 
+function formatElapsed(ms) {
+  const total = Math.max(Math.floor(ms / 1000), 0);
+  const hh = Math.floor(total / 3600);
+  const mm = Math.floor((total % 3600) / 60).toString().padStart(2, '0');
+  const ss = (total % 60).toString().padStart(2, '0');
+  return hh > 0 ? `${hh.toString().padStart(2, '0')}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+function useElapsed(startTime) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!startTime) return undefined;
+    const interval = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(interval);
+  }, [startTime]);
+  if (!startTime) return '';
+  const startMs = typeof startTime === 'number' ? startTime : new Date(startTime).getTime();
+  return formatElapsed(Date.now() - startMs);
+}
+
 function initialsFromName(name) {
   return String(name || 'Guest')
     .trim()
@@ -623,6 +643,8 @@ function MeetingScreen({
   micIndex,
   recordingActive,
   recordingBusy,
+  callStartedAt,
+  recordingStartedAt,
   deviceBusy,
   onToggleAudio,
   onToggleVideo,
@@ -648,6 +670,8 @@ function MeetingScreen({
 
   const showErrorStatus = !reconnecting && Boolean(joinError || /error|failed|disconnect/i.test(connectionState));
   const errorText = joinError || connectionState || 'Connection error';
+  const callElapsed = useElapsed(callStartedAt);
+  const recordingElapsed = useElapsed(recordingStartedAt);
   const diagnosticsText = mediaStats
     ? `Send: ${mediaStats.resolution || 'n/a'} @ ${mediaStats.fps ?? 'n/a'}fps, ${mediaStats.bitrateKbps ?? 'n/a'} kbps${
         mediaStats.rttMs != null ? `, RTT ${mediaStats.rttMs}ms` : ''
@@ -719,6 +743,18 @@ function MeetingScreen({
 
           <div className="meeting-footer">
             <div className="meeting-footer__status">
+              {callElapsed ? (
+                <span className="timer-pill" title="Call duration">
+                  <span className="timer-pill__dot timer-pill__dot--call" aria-hidden="true" />
+                  Call {callElapsed}
+                </span>
+              ) : null}
+              {recordingActive && recordingElapsed ? (
+                <span className="timer-pill timer-pill--recording" title="Recording duration">
+                  <span className="timer-pill__dot timer-pill__dot--recording" aria-hidden="true" />
+                  REC {recordingElapsed}
+                </span>
+              ) : null}
               {reconnecting ? <span className="reconnect-banner">Reconnecting...</span> : null}
               {showErrorStatus ? <span className="reconnect-banner reconnect-banner--error">{errorText}</span> : null}
             </div>
@@ -867,6 +903,8 @@ export default function App() {
   const [cameraFacing, setCameraFacing] = useState('front');
   const [recordingActive, setRecordingActive] = useState(false);
   const [recordingBusy, setRecordingBusy] = useState(false);
+  const [callStartedAt, setCallStartedAt] = useState(null);
+  const [recordingStartedAt, setRecordingStartedAt] = useState(null);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteCustomerId, setInviteCustomerId] = useState('customer-1');
@@ -1121,6 +1159,9 @@ export default function App() {
     setInviteLink('');
     setInviteCopied(false);
     setMobileChatOpen(false);
+    setCallStartedAt(null);
+    setRecordingStartedAt(null);
+    setRecordingActive(false);
     intentionalLeaveRef.current = false;
     reconnectingRef.current = false;
     reconnectAttemptRef.current = 0;
@@ -1459,6 +1500,7 @@ export default function App() {
     });
     setConnected(true);
     setConnectionState('Live');
+    setCallStartedAt((existing) => existing || Date.now());
     reconnectAttemptRef.current = 0;
     reconnectingRef.current = false;
     setScreen('meeting');
@@ -1797,7 +1839,14 @@ export default function App() {
           apiKey,
         });
         const nextState = response?.recording?.state || response?.recording?.status || response?.state || 'recording';
-        setRecordingActive(nextState === 'recording');
+        const isRecording = nextState === 'recording';
+        setRecordingActive(isRecording);
+        if (isRecording) {
+          const serverStartedAt = response?.recording?.startedAt;
+          setRecordingStartedAt(serverStartedAt ? new Date(serverStartedAt).getTime() : Date.now());
+        } else {
+          setRecordingStartedAt(null);
+        }
       } else {
         const response = await requestJson(backendUrl, `/v1/sessions/${sessionInfo.sessionId}/recording/stop`, {
           method: 'POST',
@@ -1806,6 +1855,7 @@ export default function App() {
         });
         const nextState = response?.recording?.state || response?.recording?.status || response?.state || 'stopped';
         setRecordingActive(nextState === 'recording');
+        setRecordingStartedAt(null);
       }
     } catch (error) {
       setJoinError(error.message || 'recording_failed');
@@ -1953,6 +2003,8 @@ export default function App() {
         micIndex={micIndex}
         recordingActive={recordingActive}
         recordingBusy={recordingBusy}
+        callStartedAt={callStartedAt}
+        recordingStartedAt={recordingStartedAt}
         deviceBusy={devicePickerBusy}
         onToggleAudio={() => void toggleAudio()}
         onToggleVideo={() => void toggleVideo()}

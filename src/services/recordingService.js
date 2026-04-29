@@ -3,6 +3,17 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { v7: uuidv7 } = require("uuid");
 
+let pidusage = null;
+try { pidusage = require("pidusage"); } catch (_e) {}
+
+function formatElapsed(ms) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hh = String(Math.floor(totalSeconds / 3600)).padStart(2, "0");
+  const mm = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, "0");
+  const ss = String(totalSeconds % 60).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
 class RecordingService {
   constructor(config = {}) {
     this.config = config;
@@ -188,6 +199,54 @@ class RecordingService {
     const exitCode = await this.waitProcessExit(proc, timeoutMs);
     if (exitCode === 0) return;
     throw new Error(`${binary}_failed code=${exitCode} detail=${getStderrTail()}`);
+  }
+
+  collectRecordingPids(recording) {
+    const items = [];
+    if (recording?._liveCompose && recording._liveProc?.pid && recording._liveProc.exitCode === null) {
+      items.push({ pid: recording._liveProc.pid, label: "live" });
+    }
+    for (const segment of recording?._segments || []) {
+      if (segment.ffmpeg?.pid && segment.ffmpeg.exitCode === null) {
+        items.push({ pid: segment.ffmpeg.pid, label: `participant=${segment.participantId}` });
+      }
+    }
+    return items;
+  }
+
+  logActiveRecordingTimers() {
+    const nowMs = Date.now();
+    for (const recording of this.activeBySession.values()) {
+      if (!recording.startedAt) continue;
+      const elapsedMs = Math.max(nowMs - new Date(recording.startedAt).getTime(), 0);
+      const elapsed = formatElapsed(elapsedMs);
+      const mode = recording.mode || (recording._liveCompose ? "live_compose" : this.getRecordingMode());
+      console.log(
+        `[recording] timer session=${recording.sessionId} recordingId=${recording.recordingId} mode=${mode} state=${recording.state} elapsed=${elapsed}`
+      );
+    }
+  }
+
+  async logProcessCpuUsage(recording) {
+    if (!pidusage) return;
+    const items = this.collectRecordingPids(recording);
+    if (items.length === 0) return;
+    let stats;
+    try {
+      stats = await pidusage(items.map((i) => i.pid));
+    } catch (_e) {
+      return;
+    }
+    const mode = recording.mode || (recording._liveCompose ? "live_compose" : this.getRecordingMode());
+    for (const item of items) {
+      const stat = stats[item.pid];
+      if (!stat) continue;
+      const memMb = (stat.memory / 1024 / 1024).toFixed(1);
+      const cpu = stat.cpu.toFixed(1);
+      console.log(
+        `[recording] cpu session=${recording.sessionId} recordingId=${recording.recordingId} mode=${mode} ${item.label} pid=${item.pid} cpu=${cpu}% mem=${memMb}MB`
+      );
+    }
   }
 
   getSegmentRecordingEngine() {
@@ -479,8 +538,16 @@ class RecordingService {
       _liveGetStderrTail: getStderrTail,
       _keyframeTimer: keyframeTimer,
       _warmupTimer: warmupTimer,
+      _cpuLogTimer: null,
       _stopping: false
     };
+
+    if (this.config.cpuLogs !== false && pidusage) {
+      const cpuIntervalMs = Math.max(Number.parseInt(String(this.config.cpuLogIntervalMs || 10000), 10) || 10000, 1000);
+      recording._cpuLogTimer = setInterval(() => {
+        void this.logProcessCpuUsage(recording);
+      }, cpuIntervalMs);
+    }
 
     proc.on("exit", (code) => {
       if (!recording._stopping && code !== 0 && code !== null) {
@@ -689,8 +756,15 @@ class RecordingService {
         _warmupTimer: warmupTimer,
         _chunkUploadTimer: chunkUploadTimer,
         _chunkLogTimer: chunkLogTimer,
+        _cpuLogTimer: null,
         _stopping: false
       };
+      if (this.config.cpuLogs !== false && pidusage) {
+        const cpuIntervalMs = Math.max(Number.parseInt(String(this.config.cpuLogIntervalMs || 10000), 10) || 10000, 1000);
+        recording._cpuLogTimer = setInterval(() => {
+          void this.logProcessCpuUsage(recording);
+        }, cpuIntervalMs);
+      }
       for (const segment of segmentRecorders) {
         segment.ffmpeg.on("exit", (code) => {
           if (!recording._stopping && code !== 0 && code !== null) {
@@ -739,6 +813,12 @@ class RecordingService {
     if (active._chunkLogTimer) {
       clearInterval(active._chunkLogTimer);
     }
+    if (active._cpuLogTimer) {
+      clearInterval(active._cpuLogTimer);
+    }
+    if (pidusage) {
+      try { pidusage.clear(); } catch (_e) {}
+    }
 
     if (active._liveCompose) {
       try {
@@ -771,6 +851,7 @@ class RecordingService {
       delete finished._liveGetStderrTail;
       delete finished._keyframeTimer;
       delete finished._warmupTimer;
+      delete finished._cpuLogTimer;
       this.activeBySession.delete(sessionId);
       this.upsertHistory(sessionId, finished);
       return { ok: true, recording: this.toPublic(finished) };
@@ -843,6 +924,7 @@ class RecordingService {
     delete processing._warmupTimer;
     delete processing._chunkUploadTimer;
     delete processing._chunkLogTimer;
+    delete processing._cpuLogTimer;
     delete processing._localRecordingDir;
 
     this.activeBySession.delete(sessionId);

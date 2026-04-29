@@ -1,6 +1,14 @@
 const { v7: uuidv7 } = require("uuid");
 const { activeSessionsGauge, sessionsCreatedTotal } = require("../metrics");
 
+function formatElapsed(ms) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hh = String(Math.floor(totalSeconds / 3600)).padStart(2, "0");
+  const mm = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, "0");
+  const ss = String(totalSeconds % 60).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
 class SessionStore {
   constructor(idleTtlSeconds) {
     this.idleTtlSeconds = idleTtlSeconds;
@@ -21,6 +29,7 @@ class SessionStore {
       disposition: null,
       createdAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
+      startedAt: null,
       participants: new Map(),
       lastActivityAt: now.toISOString()
     };
@@ -66,9 +75,24 @@ class SessionStore {
     });
     if (session.participants.size > 0) {
       session.status = "active";
+      if (!session.startedAt) {
+        session.startedAt = new Date().toISOString();
+      }
     }
     session.lastActivityAt = new Date().toISOString();
     return session.participants.get(participant.participantId);
+  }
+
+  logActiveSessionTimers() {
+    const nowMs = Date.now();
+    for (const session of this.sessions.values()) {
+      if (session.status !== "active" || !session.startedAt) continue;
+      const elapsedMs = Math.max(nowMs - new Date(session.startedAt).getTime(), 0);
+      const elapsed = formatElapsed(elapsedMs);
+      console.log(
+        `[session] timer session=${session.sessionId} status=${session.status} participants=${session.participants.size} elapsed=${elapsed}`
+      );
+    }
   }
 
   setParticipantState(sessionId, participantId, state) {
