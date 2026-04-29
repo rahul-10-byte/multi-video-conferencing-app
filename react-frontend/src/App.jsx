@@ -13,6 +13,12 @@ function initialsFromName(name) {
     .join('');
 }
 
+function truncateLabel(label, max = 34) {
+  const s = String(label || '').trim();
+  if (s.length <= max) return s;
+  return `${s.slice(0, max)}...`;
+}
+
 function createSocketClient(wsUrl) {
   const ws = new WebSocket(wsUrl);
   const pending = new Map();
@@ -124,6 +130,14 @@ function IconSwitchCamera() {
       <path d="M8 6h8l2 3h2v8H4V9h2l2-3Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
       <path d="M10 12h4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
       <path d="M12 10l2 2-2 2" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </SvgIcon>
+  );
+}
+
+function IconChevronDown() {
+  return (
+    <SvgIcon>
+      <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
     </SvgIcon>
   );
 }
@@ -265,6 +279,75 @@ function RemoteAudio({ stream }) {
   return <audio ref={audioRef} autoPlay playsInline />;
 }
 
+function PillDeviceDropdown({ options, selectedDeviceId, disabled, placeholder, onSelect }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocPointerDown = (event) => {
+      const node = rootRef.current;
+      if (!node) return;
+      if (event.target && node.contains(event.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocPointerDown);
+    document.addEventListener('touchstart', onDocPointerDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocPointerDown);
+      document.removeEventListener('touchstart', onDocPointerDown);
+    };
+  }, [open]);
+
+  const hasOptions = Array.isArray(options) && options.length > 0;
+
+  return (
+    <div className={`pill-dropdown ${open ? 'pill-dropdown--open' : ''}`} ref={rootRef}>
+      <button
+        type="button"
+        className="pill-dropdown__button"
+        disabled={disabled}
+        aria-label={placeholder}
+        title={placeholder}
+        onClick={() => {
+          if (disabled) return;
+          setOpen((v) => !v);
+        }}
+      >
+        <IconChevronDown />
+      </button>
+
+      {open ? (
+        <div className="pill-dropdown__menu" role="menu" aria-label={placeholder}>
+          {hasOptions ? (
+            options.map((opt) => {
+              const label = opt.label || opt.kindLabel || `Device (${String(opt.deviceId).slice(0, 6)})`;
+              const active = opt.deviceId === selectedDeviceId;
+              return (
+                <button
+                  type="button"
+                  key={opt.deviceId}
+                  className={`pill-dropdown__item ${active ? 'pill-dropdown__item--active' : ''}`}
+                  onClick={() => {
+                    onSelect(opt.deviceId);
+                    setOpen(false);
+                  }}
+                  role="menuitem"
+                >
+                  <span className="pill-dropdown__item-text">{truncateLabel(label)}</span>
+                  {active ? <span className="pill-dropdown__check">✓</span> : null}
+                </button>
+              );
+            })
+          ) : (
+            <div className="pill-dropdown__empty">No devices</div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function InviteModal({
   open,
   customerId,
@@ -336,6 +419,96 @@ function InviteModal({
             </div>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+function DevicePickerModal({
+  open,
+  cameras,
+  mics,
+  cameraIndex,
+  micIndex,
+  busy,
+  onClose,
+  onSelectCamera,
+  onSelectMicrophone,
+}) {
+  if (!open) return null;
+
+  const selectedCameraId = cameras?.[cameraIndex]?.deviceId || '';
+  const selectedMicId = mics?.[micIndex]?.deviceId || '';
+
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <div
+        className="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="device-picker-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="modal-card__head">
+          <div>
+            <p className="eyebrow">Audio & video</p>
+            <h3 id="device-picker-title">Select camera and microphone</h3>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close device picker modal">
+            ×
+          </button>
+        </div>
+
+        <div className="form-grid">
+          <label>
+            Camera
+            <select
+              value={selectedCameraId}
+              disabled={busy || !cameras || cameras.length === 0}
+              onChange={(event) => onSelectCamera(event.target.value)}
+            >
+              {cameras && cameras.length > 0 ? (
+                cameras.map((camera) => (
+                  <option key={camera.deviceId} value={camera.deviceId}>
+                    {camera.label || `Camera (${String(camera.deviceId).slice(0, 6)})`}
+                  </option>
+                ))
+              ) : (
+                <option value="" disabled>
+                  No cameras found
+                </option>
+              )}
+            </select>
+          </label>
+
+          <label>
+            Microphone
+            <select
+              value={selectedMicId}
+              disabled={busy || !mics || mics.length === 0}
+              onChange={(event) => onSelectMicrophone(event.target.value)}
+            >
+              {mics && mics.length > 0 ? (
+                mics.map((mic) => (
+                  <option key={mic.deviceId} value={mic.deviceId}>
+                    {mic.label || `Microphone (${String(mic.deviceId).slice(0, 6)})`}
+                  </option>
+                ))
+              ) : (
+                <option value="" disabled>
+                  No microphones found
+                </option>
+              )}
+            </select>
+          </label>
+        </div>
+
+        <div className="modal-card__actions">
+          <button type="button" className="ghost-button" onClick={onClose} disabled={busy}>
+            Close
+          </button>
+          {busy ? <span className="tiny-note">Updating devices...</span> : null}
+        </div>
       </div>
     </div>
   );
@@ -440,12 +613,17 @@ function MeetingScreen({
   mediaStats,
   audioMuted,
   videoMuted,
-  cameraFacing,
+  availableCameras,
+  availableMics,
+  cameraIndex,
+  micIndex,
   recordingActive,
   recordingBusy,
+  deviceBusy,
   onToggleAudio,
   onToggleVideo,
-  onSwitchCamera,
+  onSelectCameraDevice,
+  onSelectMicrophoneDevice,
   onToggleRecording,
   onLeave,
   onOpenInvite,
@@ -471,6 +649,9 @@ function MeetingScreen({
         mediaStats.rttMs != null ? `, RTT ${mediaStats.rttMs}ms` : ''
       }, loss ${mediaStats.lossPct ?? 'n/a'}%`
     : '';
+
+  const selectedCameraDeviceId = availableCameras?.[cameraIndex]?.deviceId || '';
+  const selectedMicDeviceId = availableMics?.[micIndex]?.deviceId || '';
 
   return (
     <div className="meeting-shell">
@@ -538,41 +719,45 @@ function MeetingScreen({
               {showErrorStatus ? <span className="reconnect-banner reconnect-banner--error">{errorText}</span> : null}
             </div>
             <div className="control-dock" aria-label="Meeting controls">
-              <button
-                type="button"
-                className={`control-button ${audioMuted ? 'control-button--active' : ''}`}
-                onClick={onToggleAudio}
-                disabled={reconnecting}
-                aria-label={audioMuted ? 'Unmute audio' : 'Mute audio'}
-                title={audioMuted ? 'Unmute audio' : 'Mute audio'}
-                data-tooltip={audioMuted ? 'Unmute audio' : 'Mute audio'}
-              >
-                <IconMic muted={audioMuted} />
-              </button>
+              <div className={`split-toggle ${audioMuted ? 'split-toggle--active' : ''}`}>
+                <button
+                  type="button"
+                  className="split-toggle__toggle"
+                  onClick={onToggleAudio}
+                  disabled={reconnecting || deviceBusy}
+                  aria-label={audioMuted ? 'Unmute audio' : 'Mute audio'}
+                  title={audioMuted ? 'Unmute audio' : 'Mute audio'}
+                >
+                  <IconMic muted={audioMuted} />
+                </button>
+                <PillDeviceDropdown
+                  options={availableMics || []}
+                  selectedDeviceId={selectedMicDeviceId}
+                  disabled={reconnecting || deviceBusy || !availableMics || availableMics.length === 0}
+                  placeholder="Select microphone"
+                  onSelect={(deviceId) => onSelectMicrophoneDevice(deviceId)}
+                />
+              </div>
 
-              <button
-                type="button"
-                className={`control-button ${videoMuted ? 'control-button--active' : ''}`}
-                onClick={onToggleVideo}
-                disabled={reconnecting}
-                aria-label={videoMuted ? 'Turn video on' : 'Turn video off'}
-                title={videoMuted ? 'Turn video on' : 'Turn video off'}
-                data-tooltip={videoMuted ? 'Turn video on' : 'Turn video off'}
-              >
-                <IconVideo muted={videoMuted} />
-              </button>
-
-              <button
-                type="button"
-                className="control-button control-button--secondary"
-                onClick={onSwitchCamera}
-                disabled={reconnecting}
-                aria-label={`Switch camera (${cameraFacing})`}
-                title={`Switch camera (${cameraFacing})`}
-                data-tooltip={`Switch camera (${cameraFacing})`}
-              >
-                <IconSwitchCamera />
-              </button>
+              <div className={`split-toggle ${videoMuted ? 'split-toggle--active' : ''}`}>
+                <button
+                  type="button"
+                  className="split-toggle__toggle"
+                  onClick={onToggleVideo}
+                  disabled={reconnecting || deviceBusy}
+                  aria-label={videoMuted ? 'Turn video on' : 'Turn video off'}
+                  title={videoMuted ? 'Turn video on' : 'Turn video off'}
+                >
+                  <IconVideo muted={videoMuted} />
+                </button>
+                <PillDeviceDropdown
+                  options={availableCameras || []}
+                  selectedDeviceId={selectedCameraDeviceId}
+                  disabled={reconnecting || deviceBusy || !availableCameras || availableCameras.length === 0}
+                  placeholder="Select camera"
+                  onSelect={(deviceId) => onSelectCameraDevice(deviceId)}
+                />
+              </div>
 
               <button
                 type="button"
@@ -635,9 +820,6 @@ function MeetingScreen({
           </div>
           {mobileControlsOpen ? (
             <div className="mobile-controls-menu">
-              <button type="button" className="ghost-button" onClick={onSwitchCamera} disabled={reconnecting}>
-                Switch camera
-              </button>
               <button type="button" className="ghost-button" onClick={onToggleRecording} disabled={reconnecting || recordingBusy}>
                 {recordingActive ? 'Stop recording' : 'Start recording'}
               </button>
@@ -692,7 +874,16 @@ export default function App() {
   const [mediaStats, setMediaStats] = useState(null);
   const [cameraIndex, setCameraIndex] = useState(0);
   const availableCamerasRef = useRef([]);
+  const [availableCameras, setAvailableCameras] = useState([]);
   const cameraIndexRef = useRef(0);
+  const selectedCameraDeviceIdRef = useRef('');
+  const [micIndex, setMicIndex] = useState(0);
+  const availableMicsRef = useRef([]);
+  const [availableMics, setAvailableMics] = useState([]);
+  const micIndexRef = useRef(0);
+  const selectedMicDeviceIdRef = useRef('');
+  const [devicePickerOpen, setDevicePickerOpen] = useState(false);
+  const [devicePickerBusy, setDevicePickerBusy] = useState(false);
   const socketRef = useRef(null);
   const deviceRef = useRef(null);
   const sendTransportRef = useRef(null);
@@ -775,13 +966,58 @@ export default function App() {
     const devices = await navigator.mediaDevices.enumerateDevices();
     const cameras = devices.filter((device) => device.kind === 'videoinput');
     availableCamerasRef.current = cameras;
+    setAvailableCameras(cameras);
     const currentTrack = stream?.getVideoTracks?.()[0];
     const currentDeviceId = currentTrack?.getSettings?.().deviceId;
-    const idx = cameras.findIndex((camera) => camera.deviceId === currentDeviceId);
-    const resolvedIdx = idx >= 0 ? idx : 0;
+
+    let resolvedIdx = 0;
+    if (currentDeviceId) {
+      const idx = cameras.findIndex((camera) => camera.deviceId === currentDeviceId);
+      resolvedIdx = idx >= 0 ? idx : 0;
+    } else {
+      const selectedDeviceId = selectedCameraDeviceIdRef.current;
+      if (selectedDeviceId) {
+        const idx = cameras.findIndex((camera) => camera.deviceId === selectedDeviceId);
+        resolvedIdx = idx >= 0 ? idx : resolvedIdx;
+      }
+      if (cameras.length > 0 && resolvedIdx === 0 && cameraIndexRef.current >= 0 && cameraIndexRef.current < cameras.length) {
+        resolvedIdx = cameraIndexRef.current;
+      }
+    }
+
     cameraIndexRef.current = resolvedIdx;
+    selectedCameraDeviceIdRef.current = cameras?.[resolvedIdx]?.deviceId || '';
     setCameraIndex(resolvedIdx);
     return cameras;
+  }
+
+  async function refreshAudioDevices(stream = localStream) {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const mics = devices.filter((device) => device.kind === 'audioinput');
+    availableMicsRef.current = mics;
+    setAvailableMics(mics);
+    const currentTrack = stream?.getAudioTracks?.()[0];
+    const currentDeviceId = currentTrack?.getSettings?.().deviceId;
+
+    let resolvedIdx = 0;
+    if (currentDeviceId) {
+      const idx = mics.findIndex((mic) => mic.deviceId === currentDeviceId);
+      resolvedIdx = idx >= 0 ? idx : 0;
+    } else {
+      const selectedDeviceId = selectedMicDeviceIdRef.current;
+      if (selectedDeviceId) {
+        const idx = mics.findIndex((mic) => mic.deviceId === selectedDeviceId);
+        resolvedIdx = idx >= 0 ? idx : resolvedIdx;
+      }
+      if (mics.length > 0 && resolvedIdx === 0 && micIndexRef.current >= 0 && micIndexRef.current < mics.length) {
+        resolvedIdx = micIndexRef.current;
+      }
+    }
+
+    micIndexRef.current = resolvedIdx;
+    selectedMicDeviceIdRef.current = mics?.[resolvedIdx]?.deviceId || '';
+    setMicIndex(resolvedIdx);
+    return mics;
   }
 
   async function startLocalMedia(facing = cameraFacing) {
@@ -810,6 +1046,7 @@ export default function App() {
     }
     updateLocalStream(stream);
     await refreshVideoDevices(stream).catch(() => {});
+    await refreshAudioDevices(stream).catch(() => {});
     return stream;
   }
 
@@ -1335,7 +1572,22 @@ export default function App() {
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+      let stream;
+      const selectedCamera = availableCamerasRef.current?.[cameraIndexRef.current];
+      try {
+        stream = selectedCamera?.deviceId
+          ? await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: { deviceId: { exact: selectedCamera.deviceId } },
+            })
+          : await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+      } catch (_error1) {
+        // Fallback for browsers that don't fully support exact deviceId constraints.
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { facingMode: cameraFacing === 'rear' ? 'environment' : 'user' },
+        });
+      }
       const [videoTrack] = stream.getVideoTracks();
       if (!videoTrack) {
         throw new Error('video_track_missing');
@@ -1368,82 +1620,111 @@ export default function App() {
     }
   }
 
-  async function switchCamera() {
+  async function openDevicePicker() {
     const currentStream = localStreamRef.current;
     if (!socketRef.current || !sessionInfo?.sessionId || !currentStream) return;
-    if (!videoProducerRef.current) {
-      setJoinError('camera_switch_unavailable');
-      return;
+    if (devicePickerBusy) return;
+
+    setDevicePickerBusy(true);
+    try {
+      await refreshVideoDevices(currentStream).catch(() => {});
+      await refreshAudioDevices(currentStream).catch(() => {});
+    } finally {
+      setDevicePickerBusy(false);
     }
 
-    const applyNewVideoTrack = async (newTrack, nextFacing = null, nextIndex = null) => {
-      if (!newTrack) {
-        throw new Error('camera_track_missing');
-      }
+    setDevicePickerOpen(true);
+  }
+
+  async function selectCameraDevice(deviceId) {
+    const currentStream = localStreamRef.current;
+    if (!socketRef.current || !sessionInfo?.sessionId || !currentStream) return;
+    if (!deviceId) return;
+
+    const cameras = availableCamerasRef.current || [];
+    const nextIndex = cameras.findIndex((camera) => camera.deviceId === deviceId);
+    const resolvedIndex = nextIndex >= 0 ? nextIndex : 0;
+    cameraIndexRef.current = resolvedIndex;
+    setCameraIndex(resolvedIndex);
+    selectedCameraDeviceIdRef.current = deviceId;
+
+    // If video is currently off (producer closed), just update the selection.
+    if (!videoProducerRef.current) return;
+
+    setDevicePickerBusy(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { deviceId: { exact: deviceId } },
+      });
+      const [newTrack] = stream.getVideoTracks();
+      if (!newTrack) throw new Error('camera_track_missing');
+
       newTrack.enabled = !videoMuted;
       currentStream.getVideoTracks().forEach((track) => {
         currentStream.removeTrack(track);
         track.stop();
       });
       currentStream.addTrack(newTrack);
-      if (videoProducerRef.current) {
-        await videoProducerRef.current.replaceTrack({ track: newTrack });
-      }
+
+      await videoProducerRef.current.replaceTrack({ track: newTrack });
       updateLocalStream(currentStream);
-      if (typeof nextIndex === 'number') {
-        cameraIndexRef.current = nextIndex;
-        setCameraIndex(nextIndex);
-      }
-      if (nextFacing) {
-        setCameraFacing(nextFacing);
-      }
-    };
-
-    let switched = false;
-
-    const cameras = await refreshVideoDevices(currentStream).catch(() => []);
-    if (cameras && cameras.length >= 2) {
-      const nextIndex = (cameraIndexRef.current + 1) % cameras.length;
-      const nextCamera = cameras[nextIndex];
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: { deviceId: { exact: nextCamera.deviceId } },
-        });
-        const [newTrack] = stream.getVideoTracks();
-        await applyNewVideoTrack(newTrack, `camera-${nextIndex + 1}`, nextIndex);
-        switched = true;
-      } catch (_error) {
-        // Fall through to facingMode-based fallback for mobile browsers.
-      }
-    }
-
-    if (!switched) {
-      const nextFacing = cameraFacing === 'rear' ? 'front' : 'rear';
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: { facingMode: nextFacing === 'rear' ? 'environment' : 'user' },
-        });
-        const [newTrack] = stream.getVideoTracks();
-        await applyNewVideoTrack(newTrack, nextFacing);
-        switched = true;
-      } catch (error) {
-        setJoinError(error.message || 'camera_switch_failed');
-        return;
-      }
-    }
-
-    if (!switched) {
-      setJoinError('camera_switch_unavailable');
-      return;
-    }
-    try {
-      await socketRef.current.request('deviceChanged', {
-        device: 'camera_switched',
-      });
+      await refreshVideoDevices(currentStream).catch(() => {});
+      await socketRef.current
+        .request('deviceChanged', {
+          device: 'camera_switched',
+        })
+        .catch(() => {});
     } catch (error) {
-      setJoinError(error.message || 'camera_switch_failed');
+      setJoinError(error.message || 'camera_select_failed');
+    } finally {
+      setDevicePickerBusy(false);
+    }
+  }
+
+  async function selectMicrophoneDevice(deviceId) {
+    const currentStream = localStreamRef.current;
+    if (!socketRef.current || !sessionInfo?.sessionId || !currentStream) return;
+    if (!deviceId) return;
+
+    const mics = availableMicsRef.current || [];
+    const nextIndex = mics.findIndex((mic) => mic.deviceId === deviceId);
+    const resolvedIndex = nextIndex >= 0 ? nextIndex : 0;
+    micIndexRef.current = resolvedIndex;
+    setMicIndex(resolvedIndex);
+    selectedMicDeviceIdRef.current = deviceId;
+
+    if (!audioProducerRef.current) return;
+
+    setDevicePickerBusy(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { deviceId: { exact: deviceId } },
+        video: false,
+      });
+      const [newTrack] = stream.getAudioTracks();
+      if (!newTrack) throw new Error('audio_track_missing');
+
+      newTrack.enabled = !audioMuted;
+
+      currentStream.getAudioTracks().forEach((track) => {
+        currentStream.removeTrack(track);
+        track.stop();
+      });
+      currentStream.addTrack(newTrack);
+
+      await audioProducerRef.current.replaceTrack({ track: newTrack });
+      updateLocalStream(currentStream);
+      await refreshAudioDevices(currentStream).catch(() => {});
+      await socketRef.current
+        .request('deviceChanged', {
+          device: `audio:${audioMuted ? 'muted' : 'live'}`,
+        })
+        .catch(() => {});
+    } catch (error) {
+      setJoinError(error.message || 'microphone_select_failed');
+    } finally {
+      setDevicePickerBusy(false);
     }
   }
 
@@ -1610,12 +1891,17 @@ export default function App() {
         mediaStats={mediaStats}
         audioMuted={audioMuted}
         videoMuted={videoMuted}
-        cameraFacing={cameraFacing}
+        availableCameras={availableCameras}
+        availableMics={availableMics}
+        cameraIndex={cameraIndex}
+        micIndex={micIndex}
         recordingActive={recordingActive}
         recordingBusy={recordingBusy}
+        deviceBusy={devicePickerBusy}
         onToggleAudio={() => void toggleAudio()}
         onToggleVideo={() => void toggleVideo()}
-        onSwitchCamera={() => void switchCamera()}
+        onSelectCameraDevice={(deviceId) => void selectCameraDevice(deviceId)}
+        onSelectMicrophoneDevice={(deviceId) => void selectMicrophoneDevice(deviceId)}
         onToggleRecording={() => void toggleRecording()}
         onLeave={() => void leaveMeeting()}
         onOpenInvite={() => {
