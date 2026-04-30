@@ -31,13 +31,8 @@ app.use((req, res, next) => {
   next();
 });
 
-const legacyFrontendStaticDir = path.resolve(__dirname, "../archive/frontend-legacy");
-const newFrontendStaticDir = path.resolve(__dirname, "../frontend");
-app.use(express.static(legacyFrontendStaticDir));
-app.use("/assets", express.static(path.join(newFrontendStaticDir, "assets")));
-app.get(["/v1", "/v1/"], (_req, res) => {
-  res.sendFile(path.join(newFrontendStaticDir, "index.html"));
-});
+const frontendStaticDir = path.resolve(__dirname, "../frontend");
+app.use(express.static(frontendStaticDir));
 app.use((req, res, next) => {
   const startMs = Date.now();
   res.on("finish", () => {
@@ -462,7 +457,7 @@ app.get("/v1/admin/sessions/:sessionId/events", requireApiKey, async (req, res) 
 });
 
 app.get(/^(?!\/v1\/|\/healthz$|\/readyz$|\/metrics$).*/, (_req, res) => {
-  res.sendFile(path.join(legacyFrontendStaticDir, "index.html"));
+  res.sendFile(path.join(frontendStaticDir, "index.html"));
 });
 
 const server = http.createServer(app);
