@@ -99,14 +99,15 @@ AWS Lambda function.
 | Var | Purpose | Example |
 |---|---|---|
 | `VC_RECORDING_ENABLED` | master on/off switch | `true` |
-| `VC_FFMPEG_PATH` | ffmpeg binary path | `ffmpeg` |
-| `VC_RECORDING_OUTPUT_DIR` | local scratch dir | `recordings` |
 | `VC_RECORDING_HOST_IP` | IP that the SDP advertises for plain-RTP transport | `127.0.0.1` |
 | `VC_RECORDING_BASE_PORT` | base UDP port (allocator increments by 2) | `50040` |
 | `VC_RECORDING_S3_BUCKET` | bucket for per-participant + final artifacts | `atlas-vc-recordings` |
-| `VC_RECORDING_S3_PREFIX` | key prefix inside the bucket | `recordings` |
 | `VC_RECORDING_PROCESSING_LAMBDA` | Lambda function to invoke on stop | `atlas-vc-recording-processor` |
 | `AWS_REGION` | region for S3 + Lambda clients | `ap-south-2` |
+
+Optional overrides (sensible defaults baked into `src/config.js`):
+`VC_FFMPEG_PATH` (default `ffmpeg`), `VC_RECORDING_OUTPUT_DIR` (default
+`recordings`), `VC_RECORDING_S3_PREFIX` (default `recordings`).
 
 ### S3 layout
 

@@ -13,10 +13,25 @@ function boolFromEnv(name, fallback) {
   return raw.toLowerCase() === "true";
 }
 
+function deriveWsUrl(baseUrl) {
+  try {
+    const url = new URL(baseUrl);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.pathname = "/v1/ws";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch (_e) {
+    return "ws://localhost:9000/v1/ws";
+  }
+}
+
+const baseUrl = process.env.VC_BASE_URL || "http://localhost:9000";
+
 const config = {
   port: intFromEnv("PORT", 9000),
-  baseUrl: process.env.VC_BASE_URL || "http://localhost:9000",
-  wsUrl: process.env.VC_WS_URL || "ws://localhost:9000/v1/ws",
+  baseUrl,
+  wsUrl: process.env.VC_WS_URL || deriveWsUrl(baseUrl),
   tokenIssuer: process.env.VC_TOKEN_ISSUER || "vc-backend",
   tokenAudience: process.env.VC_TOKEN_AUDIENCE || "vc-client",
   tokenTtlSeconds: intFromEnv("VC_TOKEN_TTL_SECONDS", 120),
