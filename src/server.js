@@ -62,13 +62,7 @@ const otpService = new OtpService({
   fixedCode: config.testOtpCode
 });
 const recordingPipelineService = new RecordingPipelineService(config.recording);
-const recordingService = new RecordingService({
-  ...config.recording,
-  onUploadChunk: async ({ recording, segmentDetails }) => {
-    if (!recordingPipelineService.isEnabled()) return [];
-    return await recordingPipelineService.uploadChunkFiles({ recording, segmentDetails });
-  }
-});
+const recordingService = new RecordingService(config.recording);
 const nodeId = `node_${uuidv7().replaceAll("-", "")}`;
 let reconnectWorkerRunning = false;
 
@@ -383,10 +377,6 @@ app.post("/v1/sessions/:sessionId/recording/stop", requireApiKey, async (req, re
         recording,
         segmentDetails
       });
-    },
-    onUploadChunk: async ({ recording, segmentDetails }) => {
-      if (!recordingPipelineService.isEnabled()) return [];
-      return await recordingPipelineService.uploadChunkFiles({ recording, segmentDetails });
     }
   });
   if (!result.ok) {

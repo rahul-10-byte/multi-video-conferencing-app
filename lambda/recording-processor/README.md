@@ -1,20 +1,20 @@
 # Recording Processor Lambda
 
-Minimal post-stop processor for the `segment_upload` backend flow.
+Post-stop processor for the `segment_upload_mp4` recording flow.
 
 ## What it does
 
-1. Receives event payload from backend:
-   - `bucket`
-   - `manifestKey`
-2. Reads `manifest.json` from S3.
-3. Downloads chunk files grouped by participant.
-4. Concats per-participant chunk sequence with FFmpeg.
-5. If multiple participants exist, merges participant files into one final WebM.
-6. Uploads final media to:
-   - `<manifest_dir>/final.webm`
-7. Uploads processing status to:
-   - `<manifest_dir>/processing-result.json`
+1. Receives an event from the backend with `bucket` + `manifestKey`.
+2. Downloads `manifest.json` from S3.
+3. For each participant entry in the manifest, downloads the participant's `.webm` segment.
+4. Runs FFmpeg once to:
+   - Side-by-side `hstack` (1–2 participants) or 2×2 `xstack` (3–4 participants) the participant videos at 1280×720, 24 fps.
+   - Mix all participant audio tracks via `amix=duration=longest`.
+   - Encode video as H.264 (`libx264`, `preset=ultrafast`, `crf=23`, `yuv420p`, `profile=high`, `level=4.0`) and audio as AAC (`128k` default).
+5. Uploads the resulting MP4 to `<manifest_dir>/final.mp4` (`+faststart` enabled).
+6. Writes a small `processing-result.json` next to the manifest.
+
+The Lambda always emits MP4. WebM is not produced as a final output.
 
 ## Expected event
 
@@ -33,23 +33,26 @@ Minimal post-stop processor for the `segment_upload` backend flow.
 - `AWS_REGION` (or `AWS_DEFAULT_REGION`)
 - `FFMPEG_PATH` (default `/opt/bin/ffmpeg`)
 
-Optional:
+Optional encoder tuning:
 
-- `FINAL_OUTPUT_PREFIX_SUFFIX` (default `final`)
+- `FINAL_OUTPUT_PREFIX_SUFFIX` (default `final` — produces `final.mp4`)
+- `MP4_PRESET` (default `ultrafast`)
+- `MP4_CRF` (default `23`)
+- `MP4_AUDIO_BITRATE` (default `128k`)
 
 ## IAM permissions
 
-Lambda role needs:
+The Lambda execution role needs:
 
-- `s3:GetObject` on manifest/chunk keys
-- `s3:PutObject` on final/result keys
+- `s3:GetObject` on the manifest + per-participant segment keys.
+- `s3:PutObject` on the final MP4 + result JSON keys.
 
 ## Packaging notes
 
-- This handler requires an FFmpeg binary available in Lambda.
-- Common options:
-  - Lambda Layer containing `/opt/bin/ffmpeg`
-  - Lambda container image with FFmpeg installed
+The handler requires an FFmpeg binary inside the Lambda environment. Common options:
+
+- A Lambda Layer that provides `/opt/bin/ffmpeg`.
+- A Lambda container image with FFmpeg installed (set `FFMPEG_PATH` accordingly).
 
 ## Output artifacts
 
@@ -59,5 +62,5 @@ Given:
 
 Outputs:
 
-- `recordings/a/b/final.webm`
+- `recordings/a/b/final.mp4`
 - `recordings/a/b/processing-result.json`

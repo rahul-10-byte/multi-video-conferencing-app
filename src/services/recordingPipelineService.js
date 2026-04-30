@@ -12,14 +12,13 @@ class RecordingPipelineService {
     this.processingLambdaName = String(config.processingLambdaName || "").trim();
     this.s3 = this.bucket ? new S3Client({ region: this.region }) : null;
     this.lambda = this.processingLambdaName ? new LambdaClient({ region: this.region }) : null;
-    this.uploadedChunkByPath = new Map();
   }
 
   isEnabled() {
     return Boolean(this.bucket);
   }
 
-  buildChunkKey({ sessionId, recordingId, participantId, filename }) {
+  buildSegmentKey({ sessionId, recordingId, participantId, filename }) {
     const safeSession = String(sessionId || "unknown_session").replace(/[^a-zA-Z0-9_-]/g, "_");
     const safeRecording = String(recordingId || "unknown_recording").replace(/[^a-zA-Z0-9_-]/g, "_");
     const safeParticipant = String(participantId || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -46,44 +45,13 @@ class RecordingPipelineService {
       console.log(
         `[recording] s3_upload_ok bucket=${this.bucket} key=${key} sizeBytes=${body.length}`
       );
+      return body.length;
     } catch (error) {
       console.error(
         `[recording] s3_upload_failed bucket=${this.bucket} key=${key} localPath=${localPath} error=${error?.name || "Error"}: ${error?.message || String(error)}`
       );
       throw error;
     }
-  }
-
-  async uploadChunkFiles({ recording, segmentDetails = [] }) {
-    if (!this.s3) throw new Error("recording_s3_not_configured");
-    const uploaded = [];
-    for (const segment of segmentDetails) {
-      const localPath = segment.outputFile;
-      if (!localPath) continue;
-      if (this.uploadedChunkByPath.has(localPath)) {
-        uploaded.push(this.uploadedChunkByPath.get(localPath));
-        continue;
-      }
-      const key = this.buildChunkKey({
-        sessionId: recording.sessionId,
-        recordingId: recording.recordingId,
-        participantId: segment.participantId,
-        filename: localPath
-      });
-      const stat = await fsp.stat(localPath);
-      await this.uploadFile(localPath, key);
-      const detail = {
-        participantId: segment.participantId,
-        key,
-        sizeBytes: stat.size,
-        hasVideo: Boolean(segment.hasVideo),
-        hasAudio: Boolean(segment.hasAudio),
-        localPath
-      };
-      this.uploadedChunkByPath.set(localPath, detail);
-      uploaded.push(detail);
-    }
-    return uploaded;
   }
 
   async uploadJson(key, data) {
@@ -116,29 +84,35 @@ class RecordingPipelineService {
     const uploadedSegments = [];
     let totalSize = 0;
     for (const segment of segmentDetails) {
-      const [uploaded] = await this.uploadChunkFiles({ recording, segmentDetails: [segment] });
-      if (!uploaded) continue;
-      uploadedSegments.push({
-        participantId: uploaded.participantId,
-        key: uploaded.key,
-        sizeBytes: uploaded.sizeBytes,
-        hasVideo: uploaded.hasVideo,
-        hasAudio: uploaded.hasAudio
+      const localPath = segment.outputFile;
+      if (!localPath) continue;
+      const key = this.buildSegmentKey({
+        sessionId: recording.sessionId,
+        recordingId: recording.recordingId,
+        participantId: segment.participantId,
+        filename: localPath
       });
-      totalSize += uploaded.sizeBytes;
+      const sizeBytes = await this.uploadFile(localPath, key);
+      uploadedSegments.push({
+        participantId: segment.participantId,
+        key,
+        sizeBytes,
+        hasVideo: Boolean(segment.hasVideo),
+        hasAudio: Boolean(segment.hasAudio)
+      });
+      totalSize += sizeBytes;
     }
 
     const manifestKey = this.buildManifestKey({
       sessionId: recording.sessionId,
       recordingId: recording.recordingId
     });
-    const isMp4OutputMode = String(recording?.mode || "").toLowerCase() === "segment_upload_mp4";
     const manifest = {
       version: 1,
       sessionId: recording.sessionId,
       recordingId: recording.recordingId,
-      mode: recording?.mode || "",
-      outputFormat: isMp4OutputMode ? "mp4" : "webm",
+      mode: "segment_upload_mp4",
+      outputFormat: "mp4",
       startedAt: recording.startedAt,
       stoppedAt: recording.stoppedAt,
       durationMs: recording.durationMs,
