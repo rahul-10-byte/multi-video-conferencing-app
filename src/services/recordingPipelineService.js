@@ -43,6 +43,9 @@ class RecordingPipelineService {
         Body: body,
         ContentType: "video/webm"
       }));
+      console.log(
+        `[recording] s3_upload_ok bucket=${this.bucket} key=${key} sizeBytes=${body.length}`
+      );
     } catch (error) {
       console.error(
         `[recording] s3_upload_failed bucket=${this.bucket} key=${key} localPath=${localPath} error=${error?.name || "Error"}: ${error?.message || String(error)}`
@@ -92,6 +95,7 @@ class RecordingPipelineService {
         Body: JSON.stringify(data, null, 2),
         ContentType: "application/json"
       }));
+      console.log(`[recording] s3_manifest_uploaded bucket=${this.bucket} key=${key}`);
     } catch (error) {
       console.error(
         `[recording] s3_manifest_upload_failed bucket=${this.bucket} key=${key} error=${error?.name || "Error"}: ${error?.message || String(error)}`
@@ -159,6 +163,9 @@ class RecordingPipelineService {
           InvocationType: "Event",
           Payload: Buffer.from(JSON.stringify(payload))
         }));
+        console.log(
+          `[recording] lambda_invoked function=${this.processingLambdaName} sessionId=${recording.sessionId} recordingId=${recording.recordingId} manifestKey=${manifestKey}`
+        );
       } catch (error) {
         console.error(
           `[recording] lambda_invoke_failed function=${this.processingLambdaName} sessionId=${recording.sessionId} recordingId=${recording.recordingId} error=${error?.name || "Error"}: ${error?.message || String(error)}`
@@ -166,6 +173,10 @@ class RecordingPipelineService {
         throw error;
       }
     }
+
+    console.log(
+      `[recording] upload_finalized sessionId=${recording.sessionId} recordingId=${recording.recordingId} segments=${uploadedSegments.length} totalBytes=${totalSize} manifestKey=${manifestKey}`
+    );
 
     return {
       state: "uploaded",

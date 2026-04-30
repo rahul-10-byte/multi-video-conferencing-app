@@ -1077,11 +1077,16 @@ class RecordingService {
         // safely on S3 and Lambda has been triggered, so delete the local
         // copies to keep disk usage bounded. Failure paths (catch below)
         // intentionally leave local files in place for manual recovery.
+        let deletedCount = 0;
         for (const seg of existingSegmentFiles) {
           try {
             await fsp.unlink(seg.outputFile);
+            deletedCount += 1;
           } catch (_e) {}
         }
+        console.log(
+          `[recording] local_cleanup_ok session=${sessionId} recordingId=${active.recordingId} deletedFiles=${deletedCount}`
+        );
         const finished = {
           ...uploading,
           state: finalized?.state || "uploaded",

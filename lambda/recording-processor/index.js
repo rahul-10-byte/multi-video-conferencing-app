@@ -170,7 +170,9 @@ exports.handler = async (event) => {
   if (!bucket || !manifestKey) {
     throw new Error("invalid_event_missing_bucket_or_manifest_key");
   }
+  console.log(`[lambda] event_received bucket=${bucket} manifestKey=${manifestKey}`);
 
+  const handlerStartMs = Date.now();
   const startedAt = new Date().toISOString();
   const resultKey = buildResultKey(manifestKey);
   const tmpRoot = path.join("/tmp", `vc-merge-${Date.now()}`);
@@ -184,6 +186,9 @@ exports.handler = async (event) => {
     if (segments.length === 0) throw new Error("manifest_has_no_segments");
     const outputFormat = String(manifest.outputFormat || "webm").toLowerCase();
     const isMp4 = outputFormat === "mp4";
+    console.log(
+      `[lambda] manifest_loaded sessionId=${manifest.sessionId || "?"} recordingId=${manifest.recordingId || "?"} segments=${segments.length} outputFormat=${outputFormat}`
+    );
 
     const byParticipant = new Map();
     for (const seg of segments) {
@@ -200,12 +205,18 @@ exports.handler = async (event) => {
     for (const [participantId, participantSegments] of byParticipant.entries()) {
       participantSegments.sort((a, b) => String(a.key).localeCompare(String(b.key)));
       const localChunkFiles = [];
+      let participantBytes = 0;
       for (let i = 0; i < participantSegments.length; i += 1) {
         const seg = participantSegments[i];
         const localChunk = path.join(tmpRoot, `${participantId}_${String(i).padStart(6, "0")}.webm`);
         await downloadToFile(bucket, seg.key, localChunk);
+        const stat = await fsp.stat(localChunk);
+        participantBytes += stat.size;
         localChunkFiles.push(localChunk);
       }
+      console.log(
+        `[lambda] segment_downloaded participant=${participantId} chunks=${participantSegments.length} sizeBytes=${participantBytes}`
+      );
       // For mp4 mode there is one complete WebM per participant, so skip the
       // chunk-concat step entirely and use the downloaded file directly.
       const merged = isMp4 && localChunkFiles.length === 1
@@ -215,18 +226,27 @@ exports.handler = async (event) => {
     }
 
     let finalOutput;
+    const mergeStartMs = Date.now();
     if (isMp4) {
       finalOutput = path.join(tmpRoot, "final-merged.mp4");
       const mergeArgs = buildParticipantMergeArgsMp4(participantMergedFiles, finalOutput);
+      console.log(`[lambda] merge_started format=mp4 participants=${participantMergedFiles.length}`);
       await runProcess(ffmpegPath, mergeArgs, 14 * 60 * 1000);
     } else {
       finalOutput = participantMergedFiles[0];
       if (participantMergedFiles.length > 1) {
         finalOutput = path.join(tmpRoot, "final-merged.webm");
         const mergeArgs = buildParticipantMergeArgs(participantMergedFiles, finalOutput);
+        console.log(`[lambda] merge_started format=webm participants=${participantMergedFiles.length}`);
         await runProcess(ffmpegPath, mergeArgs, 14 * 60 * 1000);
+      } else {
+        console.log(`[lambda] merge_skipped reason=single_participant_no_compose`);
       }
     }
+    const finalStat = await fsp.stat(finalOutput);
+    console.log(
+      `[lambda] merge_complete durationMs=${Date.now() - mergeStartMs} outputBytes=${finalStat.size}`
+    );
 
     const finalKey = buildFinalKey(manifestKey, isMp4 ? "mp4" : "webm");
     const finalBody = await fsp.readFile(finalOutput);
@@ -236,6 +256,7 @@ exports.handler = async (event) => {
       Body: finalBody,
       ContentType: isMp4 ? "video/mp4" : "video/webm"
     }));
+    console.log(`[lambda] final_uploaded bucket=${bucket} key=${finalKey} sizeBytes=${finalBody.length}`);
 
     const finishedAt = new Date().toISOString();
     const result = {
@@ -250,8 +271,14 @@ exports.handler = async (event) => {
       segmentCount: segments.length
     };
     await uploadJson(bucket, resultKey, result);
+    console.log(
+      `[lambda] processing_completed sessionId=${manifest.sessionId || "?"} recordingId=${manifest.recordingId || "?"} totalMs=${Date.now() - handlerStartMs} finalKey=${finalKey}`
+    );
     return result;
   } catch (error) {
+    console.error(
+      `[lambda] processing_failed manifestKey=${manifestKey} totalMs=${Date.now() - handlerStartMs} error=${error?.name || "Error"}: ${error?.message || String(error)}`
+    );
     const failed = {
       state: "failed",
       startedAt,
