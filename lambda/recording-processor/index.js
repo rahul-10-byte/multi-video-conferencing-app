@@ -42,26 +42,45 @@ async function runProcess(binary, args, timeoutMs = 10 * 60 * 1000) {
   });
 }
 
+// IMPORTANT: WebM streams from the browser MediaRecorder are VFR and contain
+// many runs of frames with identical PTS (the 1ms container tick can't fit
+// bursty MediaRecorder output). The previous chain used
+// `settb=AVTB,setpts=PTS-STARTPTS,fps=24` which, in combination with those
+// duplicate PTS values, made `fps` treat ~46% of source frames as past-tense
+// duplicates and drop them — collapsing a 10min session to ~3.5min of video
+// while audio (`amix=duration=longest`) ran the full length, leaving the
+// final MP4 frozen on a still frame after ~207s. The fix:
+//   - Do NOT touch PTS with `setpts=PTS-STARTPTS` or `settb=AVTB`. Let `fps`
+//     resample directly from the container's native PTS.
+//   - Pre-pad each branch with `tpad=clone` so `hstack`/`xstack` never
+//     starves if one participant's stream genuinely ends early.
+//   - Add `-shortest` at the muxer to trim the output to the audio length so
+//     we never emit endless cloned frames past the real end of the call.
+const TPAD_TAIL = "tpad=stop_mode=clone:stop_duration=7200";
+const VIDEO_PREP = "fps=fps=24:round=near,format=yuv420p";
+
 function buildParticipantMergeArgs(participantFiles, outputFile) {
   const args = ["-loglevel", "warning"];
-  for (const input of participantFiles) args.push("-i", input);
+  for (const input of participantFiles) {
+    args.push("-fflags", "+genpts", "-avoid_negative_ts", "make_zero", "-i", input);
+  }
   const videoCount = participantFiles.length;
   const audioCount = participantFiles.length;
   const filters = [];
   if (videoCount === 1) {
-    filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=960:540:force_original_aspect_ratio=decrease,pad=960:540:(ow-iw)/2:(oh-ih)/2[vout]");
+    filters.push(`[0:v]${VIDEO_PREP},scale=960:540:force_original_aspect_ratio=decrease,pad=960:540:(ow-iw)/2:(oh-ih)/2[vout]`);
   } else if (videoCount === 2) {
-    filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=480:540:force_original_aspect_ratio=decrease,pad=480:540:(ow-iw)/2:(oh-ih)/2[v0]");
-    filters.push("[1:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=480:540:force_original_aspect_ratio=decrease,pad=480:540:(ow-iw)/2:(oh-ih)/2[v1]");
+    filters.push(`[0:v]${VIDEO_PREP},scale=480:540:force_original_aspect_ratio=decrease,pad=480:540:(ow-iw)/2:(oh-ih)/2,${TPAD_TAIL}[v0]`);
+    filters.push(`[1:v]${VIDEO_PREP},scale=480:540:force_original_aspect_ratio=decrease,pad=480:540:(ow-iw)/2:(oh-ih)/2,${TPAD_TAIL}[v1]`);
     filters.push("[v0][v1]hstack=inputs=2:shortest=0[vout]");
   } else {
     const capped = Math.min(videoCount, 4);
     for (let i = 0; i < capped; i += 1) {
-      filters.push(`[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2[v${i}]`);
+      filters.push(`[${i}:v]${VIDEO_PREP},scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2,${TPAD_TAIL}[v${i}]`);
     }
-    const joined = Array.from({ length: Math.min(videoCount, 4) }, (_v, i) => `[v${i}]`).join("");
+    const joined = Array.from({ length: capped }, (_v, i) => `[v${i}]`).join("");
     const layout = videoCount === 3 ? "0_0|480_0|0_270" : "0_0|480_0|0_270|480_270";
-    filters.push(`${joined}xstack=inputs=${Math.min(videoCount, 4)}:layout=${layout}:shortest=0[vout]`);
+    filters.push(`${joined}xstack=inputs=${capped}:layout=${layout}:shortest=0[vout]`);
   }
   if (audioCount > 0) {
     const cappedAudio = Math.min(audioCount, 6);
@@ -71,26 +90,29 @@ function buildParticipantMergeArgs(participantFiles, outputFile) {
   args.push("-filter_complex", filters.join(";"));
   args.push("-map", "[vout]", "-c:v", "libvpx-vp9", "-b:v", "1200k", "-crf", "32", "-deadline", "realtime", "-cpu-used", "3");
   if (audioCount > 0) args.push("-map", "[aout]", "-c:a", "libopus", "-b:a", "64k");
+  if (videoCount > 1) args.push("-shortest");
   args.push("-f", "webm", outputFile);
   return args;
 }
 
 function buildParticipantMergeArgsMp4(participantFiles, outputFile) {
   const args = ["-loglevel", "warning"];
-  for (const input of participantFiles) args.push("-i", input);
+  for (const input of participantFiles) {
+    args.push("-fflags", "+genpts", "-avoid_negative_ts", "make_zero", "-i", input);
+  }
   const videoCount = participantFiles.length;
   const audioCount = participantFiles.length;
   const filters = [];
   if (videoCount === 1) {
-    filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]");
+    filters.push(`[0:v]${VIDEO_PREP},scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]`);
   } else if (videoCount === 2) {
-    filters.push("[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2[v0]");
-    filters.push("[1:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2[v1]");
+    filters.push(`[0:v]${VIDEO_PREP},scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,${TPAD_TAIL}[v0]`);
+    filters.push(`[1:v]${VIDEO_PREP},scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,${TPAD_TAIL}[v1]`);
     filters.push("[v0][v1]hstack=inputs=2:shortest=0[vout]");
   } else {
     const capped = Math.min(videoCount, 4);
     for (let i = 0; i < capped; i += 1) {
-      filters.push(`[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=24,format=yuv420p,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2[v${i}]`);
+      filters.push(`[${i}:v]${VIDEO_PREP},scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,${TPAD_TAIL}[v${i}]`);
     }
     const joined = Array.from({ length: capped }, (_v, i) => `[v${i}]`).join("");
     const layout = capped === 3 ? "0_0|640_0|0_360" : "0_0|640_0|0_360|640_360";
@@ -117,6 +139,7 @@ function buildParticipantMergeArgsMp4(participantFiles, outputFile) {
   if (audioCount > 0) {
     args.push("-map", "[aout]", "-c:a", "aac", "-b:a", audioBitrate);
   }
+  if (videoCount > 1) args.push("-shortest");
   args.push("-movflags", "+faststart", "-f", "mp4", outputFile);
   return args;
 }
