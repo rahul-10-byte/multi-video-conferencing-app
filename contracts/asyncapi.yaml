@@ -1,0 +1,530 @@
+asyncapi: 2.6.0
+info:
+  title: VC Backend WebSocket API
+  version: 1.1.0
+  description: |
+    Mediasoup-based realtime channel between client and backend. The client
+    upgrades a WebSocket to `/v1/ws` and exchanges JSON envelopes.
+
+    Every envelope is `{ event, data, requestId? }`. When the client
+    includes a `requestId`, the server's direct response or `ack` echoes
+    the same `requestId` so callers can correlate replies.
+
+    Authentication happens via the `join` event whose `data.token` is a
+    JWT issued by `POST /v1/sessions/{id}/join-token`.
+
+servers:
+  local:
+    url: localhost:9000
+    protocol: ws
+    pathname: /v1/ws
+
+channels:
+  /v1/ws:
+    description: Single channel handling all client-server message types.
+    publish:
+      description: Messages the client sends to the server.
+      message:
+        oneOf:
+          - $ref: "#/components/messages/Join"
+          - $ref: "#/components/messages/CreateTransport"
+          - $ref: "#/components/messages/ConnectTransport"
+          - $ref: "#/components/messages/Produce"
+          - $ref: "#/components/messages/Consume"
+          - $ref: "#/components/messages/ListProducers"
+          - $ref: "#/components/messages/PauseProducer"
+          - $ref: "#/components/messages/ResumeProducer"
+          - $ref: "#/components/messages/Leave"
+          - $ref: "#/components/messages/ChatSend"
+          - $ref: "#/components/messages/DeviceChanged"
+          - $ref: "#/components/messages/QualityReport"
+    subscribe:
+      description: Messages the server sends to the client.
+      message:
+        oneOf:
+          - $ref: "#/components/messages/Connected"
+          - $ref: "#/components/messages/Joined"
+          - $ref: "#/components/messages/TransportCreated"
+          - $ref: "#/components/messages/Produced"
+          - $ref: "#/components/messages/Consumed"
+          - $ref: "#/components/messages/ParticipantUpdate"
+          - $ref: "#/components/messages/ParticipantPresence"
+          - $ref: "#/components/messages/ChatMessage"
+          - $ref: "#/components/messages/DeviceChangedBroadcast"
+          - $ref: "#/components/messages/QualityAlert"
+          - $ref: "#/components/messages/Left"
+          - $ref: "#/components/messages/Ack"
+          - $ref: "#/components/messages/Error"
+
+components:
+  schemas:
+    Envelope:
+      type: object
+      required: [event, data]
+      additionalProperties: false
+      properties:
+        event: { type: string }
+        data:
+          type: object
+          additionalProperties: true
+        requestId:
+          type: string
+          description: Echoed by the server in direct responses and `ack`s.
+
+  messages:
+    # ---------- client -> server ----------
+    Join:
+      name: join
+      summary: Authenticate the WS connection with a join token.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: join }
+              data:
+                type: object
+                required: [token]
+                properties:
+                  token:
+                    type: string
+                    description: JWT from `POST /v1/sessions/{id}/join-token`.
+                  rtpCapabilities:
+                    type: object
+                    nullable: true
+                    description: Optional client RTP capabilities (mediasoup `RtpCapabilities`).
+
+    CreateTransport:
+      name: createTransport
+      summary: Allocate a WebRTC transport for sending or receiving.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: createTransport }
+              data:
+                type: object
+                properties:
+                  direction:
+                    type: string
+                    enum: [send, recv]
+                    default: send
+
+    ConnectTransport:
+      name: connectTransport
+      summary: Provide DTLS parameters to finish transport setup.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: connectTransport }
+              data:
+                type: object
+                required: [transportId, dtlsParameters]
+                properties:
+                  transportId: { type: string }
+                  dtlsParameters: { type: object }
+
+    Produce:
+      name: produce
+      summary: Start producing an outbound media track.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: produce }
+              data:
+                type: object
+                required: [transportId, kind, rtpParameters]
+                properties:
+                  transportId: { type: string }
+                  kind:
+                    type: string
+                    enum: [audio, video]
+                  rtpParameters: { type: object }
+
+    Consume:
+      name: consume
+      summary: Subscribe to a remote producer.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: consume }
+              data:
+                type: object
+                required: [transportId, producerId]
+                properties:
+                  transportId: { type: string }
+                  producerId: { type: string }
+                  rtpCapabilities:
+                    type: object
+                    nullable: true
+
+    ListProducers:
+      name: listProducers
+      summary: Ask the server for the current list of producers in this session.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: listProducers }
+
+    PauseProducer:
+      name: pauseProducer
+      summary: Pause one of the caller's own producers (agent only).
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: pauseProducer }
+              data:
+                type: object
+                required: [producerId]
+                properties:
+                  producerId: { type: string }
+
+    ResumeProducer:
+      name: resumeProducer
+      summary: Resume one of the caller's own producers (agent only).
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: resumeProducer }
+              data:
+                type: object
+                required: [producerId]
+                properties:
+                  producerId: { type: string }
+
+    Leave:
+      name: leave
+      summary: Cleanly leave the session.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: leave }
+
+    ChatSend:
+      name: chatSend
+      summary: Send a chat message that the server fans out as `chatMessage`.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: chatSend }
+              data:
+                type: object
+                required: [text]
+                properties:
+                  text:
+                    type: string
+                    description: Trimmed before broadcast; cannot be empty.
+
+    DeviceChanged:
+      name: deviceChanged
+      summary: Notify peers that the local input device changed.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: deviceChanged }
+              data:
+                type: object
+                required: [device]
+                properties:
+                  device: { type: string }
+
+    QualityReport:
+      name: qualityReport
+      summary: Periodic client-side quality telemetry.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: qualityReport }
+              data:
+                type: object
+                description: |
+                  Server records Prometheus metrics from the numeric fields
+                  and emits `qualityAlert` to the same client when severity
+                  rises above `low`.
+                properties:
+                  outboundRttMs: { type: number }
+                  inboundJitterMs: { type: number }
+                  inboundPacketLossPct: { type: number }
+                  iceConnectionState: { type: string }
+
+    # ---------- server -> client ----------
+    Connected:
+      name: connected
+      summary: Greeting on socket open (no auth yet).
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: connected }
+              data:
+                type: object
+                required: [version]
+                properties:
+                  version: { type: string, enum: [v1] }
+
+    Joined:
+      name: joined
+      summary: Direct response to a successful `join`.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: joined }
+              data:
+                type: object
+                required: [sessionId, participantId, role, routerRtpCapabilities]
+                properties:
+                  sessionId: { type: string }
+                  participantId: { type: string }
+                  role:
+                    type: string
+                    enum: [agent, customer]
+                  routerRtpCapabilities: { type: object }
+
+    TransportCreated:
+      name: transportCreated
+      summary: Direct response to `createTransport`.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: transportCreated }
+              data:
+                type: object
+                required: [direction, id, iceParameters, iceCandidates, dtlsParameters]
+                properties:
+                  direction:
+                    type: string
+                    enum: [send, recv]
+                  id: { type: string }
+                  iceParameters: { type: object }
+                  iceCandidates:
+                    type: array
+                    items: { type: object }
+                  dtlsParameters: { type: object }
+
+    Produced:
+      name: produced
+      summary: Direct response to `produce`.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: produced }
+              data:
+                type: object
+                required: [producerId]
+                properties:
+                  producerId: { type: string }
+
+    Consumed:
+      name: consumed
+      summary: Direct response to `consume`.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: consumed }
+              data:
+                type: object
+                required: [consumerId, producerId, kind, rtpParameters]
+                properties:
+                  consumerId: { type: string }
+                  producerId: { type: string }
+                  kind:
+                    type: string
+                    enum: [audio, video]
+                  rtpParameters: { type: object }
+
+    ParticipantUpdate:
+      name: participantUpdate
+      summary: Direct response to `listProducers`.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: participantUpdate }
+              data:
+                type: object
+                required: [producers]
+                properties:
+                  producers:
+                    type: array
+                    items: { type: object }
+
+    ParticipantPresence:
+      name: participantPresence
+      summary: |
+        Broadcast to every socket in the session whenever a participant's
+        presence changes (`connected`, `reconnected`, `reconnecting`, `left`).
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: participantPresence }
+              data:
+                type: object
+                required: [sessionId, participantId, role, state]
+                properties:
+                  sessionId: { type: string }
+                  participantId: { type: string }
+                  role:
+                    type: string
+                    enum: [agent, customer]
+                  state:
+                    type: string
+                    enum: [connected, reconnected, reconnecting, left]
+
+    ChatMessage:
+      name: chatMessage
+      summary: Broadcast of a chat message sent by some participant.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: chatMessage }
+              data:
+                type: object
+                required: [messageId, sessionId, participantId, role, text, sentAt]
+                properties:
+                  messageId: { type: string }
+                  sessionId: { type: string }
+                  participantId: { type: string }
+                  role:
+                    type: string
+                    enum: [agent, customer]
+                  text: { type: string }
+                  sentAt: { type: string, format: date-time }
+
+    DeviceChangedBroadcast:
+      name: deviceChanged
+      summary: Broadcast of a peer's device change.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: deviceChanged }
+              data:
+                type: object
+                required: [sessionId, participantId, role, device, changedAt]
+                properties:
+                  sessionId: { type: string }
+                  participantId: { type: string }
+                  role:
+                    type: string
+                    enum: [agent, customer]
+                  device: { type: string }
+                  changedAt: { type: string, format: date-time }
+
+    QualityAlert:
+      name: qualityAlert
+      summary: |
+        Sent only to the reporting client when its `qualityReport` exceeds
+        the medium/high severity thresholds.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: qualityAlert }
+              data:
+                type: object
+                required: [sessionId, participantId, role, severity, metrics]
+                properties:
+                  sessionId: { type: string }
+                  participantId: { type: string }
+                  role: { type: string }
+                  severity:
+                    type: string
+                    enum: [medium, high]
+                  metrics:
+                    type: object
+                    properties:
+                      outboundRttMs: { type: number, nullable: true }
+                      inboundJitterMs: { type: number, nullable: true }
+                      inboundPacketLossPct: { type: number, nullable: true }
+                      iceConnectionState: { type: string, nullable: true }
+
+    Left:
+      name: left
+      summary: Direct response confirming `leave`.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: left }
+              data: { type: object }
+
+    Ack:
+      name: ack
+      summary: |
+        Generic acknowledgement for events that don't have a dedicated
+        response message (e.g. `connectTransport`, `pauseProducer`,
+        `resumeProducer`, `chatSend`, `deviceChanged`, `qualityReport`).
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: ack }
+              data:
+                type: object
+                required: [event]
+                properties:
+                  event:
+                    type: string
+                    description: The original client event being ACKed.
+
+    Error:
+      name: error
+      summary: Server-side error response. May or may not be in reply to a request.
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/Envelope"
+          - type: object
+            properties:
+              event: { const: error }
+              data:
+                type: object
+                required: [code]
+                properties:
+                  code:
+                    type: string
+                    description: |
+                      Stable error code, e.g. `invalid_json`, `invalid_payload`,
+                      `unauthorized`, `forbidden`, `missing_token`,
+                      `session_not_found`, `internal_error`.
+                  detail:
+                    type: string
+                    description: Human-readable detail string.

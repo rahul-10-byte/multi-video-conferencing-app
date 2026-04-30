@@ -1,32 +1,91 @@
 openapi: 3.0.3
 info:
-  title: VC API
-  version: 1.0.0
-  description: Mediasoup-only VC API v1
+  title: VC Backend API
+  version: 1.1.0
+  description: |
+    Mediasoup-based video-call backend. Covers session lifecycle, join-token
+    issuance, ICE servers, customer OTP invite flow, recording start/stop,
+    session disposition, and admin read-model endpoints.
+
+    All `/v1/*` mutating routes (and most read routes) require an API key
+    when `VC_API_KEY` is configured on the server. Send the key as either
+    `Authorization: Bearer <key>` or `X-API-Key: <key>`.
 servers:
   - url: http://localhost:9000
+    description: Local development
+tags:
+  - name: health
+  - name: sessions
+  - name: tokens
+  - name: ice
+  - name: invite
+  - name: recording
+  - name: disposition
+  - name: admin
+
 paths:
   /healthz:
     get:
-      summary: Liveness check
+      tags: [health]
+      summary: Liveness probe
+      security: []
       responses:
         "200":
-          description: OK
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+
   /readyz:
     get:
-      summary: Readiness check
+      tags: [health]
+      summary: Readiness probe (Mediasoup worker initialised)
+      security: []
       responses:
         "200":
           description: Ready
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, mediasoup]
+                properties:
+                  status: { type: string, enum: [ready] }
+                  mediasoup: { type: string, enum: [ok] }
+        "503":
+          description: Not ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [not_ready] }
+                  mediasoup: { type: string, enum: [not_initialized] }
+
   /metrics:
     get:
-      summary: Prometheus metrics
+      tags: [health]
+      summary: Prometheus exposition endpoint
+      security: []
       responses:
         "200":
-          description: Metrics payload
+          description: Prometheus text format
+          content:
+            text/plain:
+              schema:
+                type: string
+
   /v1/sessions:
     post:
-      summary: Create session
+      tags: [sessions]
+      summary: Create a new session
+      security: []
       requestBody:
         required: false
         content:
@@ -40,8 +99,44 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CreateSessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /v1/sessions/resolve:
+    get:
+      tags: [sessions]
+      summary: Resolve a session id by stable room name
+      description: |
+        Looks up an existing session whose `metadata.roomName` matches the
+        supplied query argument. Returns a minimal session header.
+      security: []
+      parameters:
+        - in: query
+          name: roomName
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Session header
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionId, status, createdAt, expiresAt]
+                properties:
+                  sessionId: { type: string }
+                  status: { $ref: "#/components/schemas/SessionStatus" }
+                  createdAt: { type: string, format: date-time }
+                  expiresAt: { type: string, format: date-time }
+                  roomName: { type: string, nullable: true }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /v1/sessions/{sessionId}:
     get:
+      tags: [sessions]
       summary: Get session state
       parameters:
         - $ref: "#/components/parameters/SessionId"
@@ -52,16 +147,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SessionState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
-          description: Not found
-    post:
-      summary: Reserved
-      responses:
-        "405":
-          description: Method not allowed
+          $ref: "#/components/responses/NotFound"
+
   /v1/sessions/{sessionId}/join-token:
     post:
-      summary: Issue participant join token
+      tags: [tokens]
+      summary: Issue a participant join token
+      description: |
+        Returns a short-lived JWT used to authenticate the WebSocket
+        `join` event. For `role=customer` the participant must have a
+        successful `customer-verify-otp` first.
       parameters:
         - $ref: "#/components/parameters/SessionId"
       requestBody:
@@ -77,43 +175,63 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/JoinTokenResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: OTP verification required for customer role
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
-          description: Session not found
+          $ref: "#/components/responses/NotFound"
+
   /v1/ice-servers:
     get:
-      summary: Get ICE servers for session
+      tags: [ice]
+      summary: Get STUN/TURN servers for a session
+      security: []
       parameters:
         - in: query
           name: sessionId
           required: true
-          schema:
-            type: string
+          schema: { type: string }
       responses:
         "200":
-          description: ICE servers returned
+          description: ICE servers
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/IceServersResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "404":
-          description: Session not found
+          $ref: "#/components/responses/NotFound"
+
   /v1/sessions/{sessionId}/participants:
     get:
-      summary: List participants
+      tags: [sessions]
+      summary: List participants in a session
       parameters:
         - $ref: "#/components/parameters/SessionId"
       responses:
         "200":
-          description: Participant list
+          description: Participants
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ParticipantsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
-          description: Session not found
+          $ref: "#/components/responses/NotFound"
+
   /v1/sessions/{sessionId}/leave:
     post:
-      summary: Leave/end session
+      tags: [sessions]
+      summary: End a session
       parameters:
         - $ref: "#/components/parameters/SessionId"
       responses:
@@ -123,24 +241,347 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LeaveResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
-          description: Session not found
+          $ref: "#/components/responses/NotFound"
+
+  /v1/sessions/{sessionId}/customer-invite:
+    post:
+      tags: [invite]
+      summary: Issue an OTP-protected customer invite link
+      description: |
+        Generates a one-time-passcode challenge for the customer and
+        records an invite link on the session. In test mode the OTP is
+        echoed back in the response (`otp.testMode=true`).
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [participantId]
+              properties:
+                participantId: { type: string }
+                channel: { type: string, default: link }
+      responses:
+        "200":
+          description: Invite created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerInviteResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/sessions/{sessionId}/customer-verify-otp:
+    post:
+      tags: [invite]
+      summary: Verify a customer's OTP
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [participantId, otp]
+              properties:
+                participantId: { type: string }
+                otp: { type: string }
+      responses:
+        "200":
+          description: Verified
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionId, participantId, verified, verifiedAt]
+                properties:
+                  sessionId: { type: string }
+                  participantId: { type: string }
+                  verified: { type: boolean, enum: [true] }
+                  verifiedAt: { type: string, format: date-time }
+        "400":
+          description: Invalid input or wrong OTP
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      attemptsLeft:
+                        type: integer
+                        nullable: true
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/sessions/{sessionId}/recording/start:
+    post:
+      tags: [recording]
+      summary: Start a recording for the session
+      description: |
+        Spawns one FFmpeg process per producing participant that writes a
+        single `.webm` file each. `initiatedBy` must correspond to a
+        participant with `role=agent` once the session has any
+        participants (otherwise 403).
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                initiatedBy: { type: string, default: system }
+      responses:
+        "200":
+          description: Recording started
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [recording]
+                properties:
+                  recording:
+                    $ref: "#/components/schemas/Recording"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot start (already active, no producers, etc.)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      detail: { type: string, nullable: true }
+
+  /v1/sessions/{sessionId}/recording/stop:
+    post:
+      tags: [recording]
+      summary: Stop the active recording
+      description: |
+        Gracefully signals each per-participant FFmpeg, uploads the
+        per-participant WebMs to S3, writes a `manifest.json`, and
+        invokes the post-processing Lambda asynchronously. The HTTP
+        response reflects the **uploading/uploaded/failed** state at
+        the moment the upload finalize hook returns.
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                stoppedBy: { type: string, default: system }
+      responses:
+        "200":
+          description: Recording stopped (state in body)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [recording]
+                properties:
+                  recording:
+                    $ref: "#/components/schemas/Recording"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: No recording is active
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/sessions/{sessionId}/disposition:
+    post:
+      tags: [disposition]
+      summary: Record the outcome of a session
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [outcome]
+              properties:
+                outcome:
+                  type: string
+                  enum: [resolved, follow_up, dropped]
+                notes: { type: string, nullable: true }
+                resolvedBy: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Disposition recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [disposition]
+                properties:
+                  disposition:
+                    $ref: "#/components/schemas/Disposition"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/admin/sessions:
+    get:
+      tags: [admin]
+      summary: List recent sessions from the read model
+      description: |
+        Backed by the optional Postgres read model. Returns 503 when
+        `DATABASE_URL` is not configured.
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 200 }
+      responses:
+        "200":
+          description: Sessions list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessions, total]
+                properties:
+                  sessions:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+                  total: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Read model disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/admin/sessions/{sessionId}/events:
+    get:
+      tags: [admin]
+      summary: List events for a session from the read model
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - in: query
+          name: limit
+          schema: { type: integer, default: 100, maximum: 500 }
+      responses:
+        "200":
+          description: Events list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionId, events, total]
+                properties:
+                  sessionId: { type: string }
+                  events:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+                  total: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Read model disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
 components:
+  securitySchemes:
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    bearerAuth:
+      type: http
+      scheme: bearer
+  security:
+    - apiKeyHeader: []
+    - bearerAuth: []
+
   parameters:
     SessionId:
       in: path
       name: sessionId
       required: true
-      schema:
-        type: string
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Caller is not allowed to perform this action
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
   schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        detail:
+          type: string
+          nullable: true
+
+    SessionStatus:
+      type: string
+      enum: [created, active, idle, ended]
+
     CreateSessionRequest:
       type: object
       properties:
-        externalRef:
-          type: string
-          nullable: true
+        externalRef: { type: string, nullable: true }
         metadata:
           type: object
           additionalProperties: true
@@ -148,135 +589,172 @@ components:
           type: integer
           minimum: 60
           maximum: 86400
+          default: 3600
+
     CreateSessionResponse:
       type: object
       required: [sessionId, status, createdAt, expiresAt]
       properties:
-        sessionId:
-          type: string
-        status:
-          type: string
-          enum: [created, active, idle, ended]
-        createdAt:
-          type: string
-          format: date-time
-        expiresAt:
-          type: string
-          format: date-time
+        sessionId: { type: string }
+        status: { $ref: "#/components/schemas/SessionStatus" }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+
     JoinTokenRequest:
       type: object
       required: [participantId, role]
       properties:
-        participantId:
-          type: string
+        participantId: { type: string }
         role:
           type: string
           enum: [agent, customer]
-        displayName:
-          type: string
+        displayName: { type: string, nullable: true }
         ttlSeconds:
           type: integer
           minimum: 30
           maximum: 900
+
     JoinTokenResponse:
       type: object
       required: [token, expiresAt, wsUrl, sessionId]
       properties:
-        token:
-          type: string
-        expiresAt:
-          type: string
-          format: date-time
-        wsUrl:
-          type: string
-        sessionId:
-          type: string
+        token: { type: string }
+        expiresAt: { type: string, format: date-time }
+        wsUrl: { type: string }
+        sessionId: { type: string }
+
     IceServer:
       type: object
       required: [urls]
       properties:
         urls:
           type: array
-          items:
-            type: string
-        username:
-          type: string
-        credential:
-          type: string
+          items: { type: string }
+        username: { type: string }
+        credential: { type: string }
         credentialType:
           type: string
           enum: [password]
+
     IceServersResponse:
       type: object
       required: [iceServers, ttlSeconds]
       properties:
         iceServers:
           type: array
-          items:
-            $ref: "#/components/schemas/IceServer"
-        ttlSeconds:
-          type: integer
+          items: { $ref: "#/components/schemas/IceServer" }
+        ttlSeconds: { type: integer }
+
     Participant:
       type: object
       required: [participantId, role, state]
       properties:
-        participantId:
-          type: string
+        participantId: { type: string }
         role:
           type: string
           enum: [agent, customer]
-        displayName:
-          type: string
-          nullable: true
+        displayName: { type: string, nullable: true }
         state:
           type: string
-        joinedAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
+          description: |
+            One of `token_issued`, `connected`, `reconnecting`, `reconnected`, `left`.
+        joinedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
     ParticipantsResponse:
       type: object
       required: [participants, total]
       properties:
         participants:
           type: array
-          items:
-            $ref: "#/components/schemas/Participant"
-        total:
-          type: integer
+          items: { $ref: "#/components/schemas/Participant" }
+        total: { type: integer }
+
     SessionState:
       type: object
       required: [sessionId, status, createdAt, expiresAt, lastActivityAt, participantCount]
       properties:
-        sessionId:
-          type: string
-        status:
-          type: string
-        createdAt:
-          type: string
-          format: date-time
-        expiresAt:
-          type: string
-          format: date-time
-        lastActivityAt:
-          type: string
-          format: date-time
-        participantCount:
-          type: integer
+        sessionId: { type: string }
+        status: { $ref: "#/components/schemas/SessionStatus" }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        lastActivityAt: { type: string, format: date-time }
+        participantCount: { type: integer }
         metadata:
           type: object
           additionalProperties: true
+        inviteLinks:
+          type: array
+          items: { type: string }
+        disposition:
+          oneOf:
+            - { $ref: "#/components/schemas/Disposition" }
+            - { type: "null" }
+        activeRecording:
+          oneOf:
+            - { $ref: "#/components/schemas/Recording" }
+            - { type: "null" }
+
     LeaveResponse:
       type: object
       required: [sessionId, status, endedAt]
       properties:
-        sessionId:
+        sessionId: { type: string }
+        status: { type: string, enum: [ended] }
+        endedAt: { type: string, format: date-time }
+
+    CustomerInviteResponse:
+      type: object
+      required: [sessionId, participantId, inviteLink, sentAt, otp]
+      properties:
+        sessionId: { type: string }
+        participantId: { type: string }
+        inviteLink: { type: string }
+        sentAt: { type: string, format: date-time }
+        otp:
+          type: object
+          required: [testMode, code, expiresAt]
+          properties:
+            testMode: { type: boolean }
+            code:
+              type: string
+              description: Only populated in test mode.
+            expiresAt: { type: string, format: date-time }
+
+    Disposition:
+      type: object
+      required: [sessionId, outcome, resolvedAt]
+      properties:
+        sessionId: { type: string }
+        outcome:
           type: string
-        status:
+          enum: [resolved, follow_up, dropped]
+        notes: { type: string, nullable: true }
+        resolvedBy: { type: string, nullable: true }
+        resolvedAt: { type: string, format: date-time }
+
+    Recording:
+      type: object
+      required: [recordingId, sessionId, state, startedAt, mode, engine]
+      properties:
+        recordingId: { type: string }
+        sessionId: { type: string }
+        state:
           type: string
-          enum: [ended]
-        endedAt:
-          type: string
-          format: date-time
+          enum: [recording, processing, uploading, uploaded, failed]
+        storageUri: { type: string }
+        startedAt: { type: string, format: date-time }
+        stoppedAt: { type: string, format: date-time, nullable: true }
+        durationMs: { type: integer, nullable: true }
+        sizeBytes: { type: integer, nullable: true }
+        initiatedBy: { type: string, nullable: true }
+        stoppedBy: { type: string, nullable: true }
+        ffmpegStderrTail: { type: string }
+        segmentCount: { type: integer }
+        mergeStderrTail: { type: string }
+        engine: { type: string, enum: [ffmpeg] }
+        mode: { type: string, enum: [segment_upload_mp4] }
+        tapCount: { type: integer }
+        audioTapCount: { type: integer }
+        videoTapCount: { type: integer }
+        manifestKey: { type: string }

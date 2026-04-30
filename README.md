@@ -1,6 +1,20 @@
 # Multi Video Conferencing App
 
-Contract-first backend scaffold for Multi Video Conferencing App aligned to `MEDIASOUP_ONLY_VC_PLAN.md`.
+Mediasoup-based backend for the Multi Video Conferencing App, aligned to
+`MEDIASOUP_ONLY_VC_PLAN.md`.
+
+## API surface
+
+The full REST + WebSocket surface is documented in `contracts/`:
+
+- `contracts/openapi.yaml` — OpenAPI 3.0 spec for every `/v1/*`, `/healthz`,
+  `/readyz`, and `/metrics` route.
+- `contracts/asyncapi.yaml` — AsyncAPI 2.6 spec for the `/v1/ws` channel,
+  covering all client-to-server and server-to-client message types.
+
+Render either with the official viewers (Swagger UI, Redoc, AsyncAPI Studio,
+etc.) — neither file is enforced at runtime, so keep them in sync when you
+change the wire format.
 
 ## Implemented in this increment
 
@@ -36,7 +50,6 @@ Contract-first backend scaffold for Multi Video Conferencing App aligned to `MED
   - `pauseProducer` / `resumeProducer`
   - `chatSend` / `chatMessage`
   - `deviceChanged`
-- OpenAPI contract and WS schema under `contracts/`.
 - Admin read-model endpoints:
   - `GET /v1/admin/sessions`
   - `GET /v1/admin/sessions/{sessionId}/events`
@@ -51,54 +64,73 @@ Contract-first backend scaffold for Multi Video Conferencing App aligned to `MED
 - TURN REST short-lived credential issuance.
 - Production OTP/SMS/email provider integration (current OTP is in-memory test mode).
 
-## Recording (FFmpeg pipeline)
+## Recording
 
-- Recording APIs now spawn an FFmpeg process and store a `.webm` file per session.
-- Output path is saved in `recording.storageUri` and persisted in `vc_recordings`.
-- Required on server: FFmpeg installed and available in PATH (or set `VC_FFMPEG_PATH`).
-- Config:
-  - `VC_RECORDING_ENABLED=true`
-  - `VC_FFMPEG_PATH=ffmpeg`
-  - `VC_RECORDING_OUTPUT_DIR=recordings`
-  - `VC_RECORDING_HOST_IP=127.0.0.1`
-  - `VC_RECORDING_BASE_PORT=50040`
+The backend supports a single recording flow: per-participant WebM capture on
+the server, S3 upload on stop, and asynchronous merge into a final MP4 by an
+AWS Lambda function.
 
-### Segment Upload + Lambda processing
+### How it works
 
-For incremental S3 uploads and async post-processing:
+1. On `POST /v1/sessions/{id}/recording/start` the server creates one
+   plain-RTP transport per producer, consumes audio + video for each
+   participant, and spawns an FFmpeg process that writes a single
+   `.webm` file per participant to `VC_RECORDING_OUTPUT_DIR`.
+2. On `POST /v1/sessions/{id}/recording/stop` each FFmpeg process is
+   gracefully stopped (`SIGINT` flush), every per-participant `.webm` is
+   uploaded to S3, a `manifest.json` is written next to them, and the
+   recording-processor Lambda is invoked asynchronously with the manifest
+   key.
+3. The Lambda downloads the per-participant WebMs, hstacks/xstacks them
+   with audio mix, encodes a single `final.mp4`, and writes a small
+   `processing-result.json`. See `lambda/recording-processor/README.md`.
+4. The server deletes the local `.webm` files after a successful upload
+   to keep disk usage bounded. If upload or Lambda invocation fails, the
+   local files are kept for manual recovery.
 
-- `VC_RECORDING_MODE=segment_upload`
-- `VC_RECORDING_ENGINE=ffmpeg`
-- `VC_RECORDING_CHUNK_SECONDS=5`
-- `VC_RECORDING_CHUNK_LOGS=true` (set to `false` to mute per-chunk server logs)
-- `VC_RECORDING_S3_BUCKET=<bucket>`
-- `VC_RECORDING_S3_PREFIX=recordings`
-- `VC_RECORDING_PROCESSING_LAMBDA=<lambda-name>`
-- `AWS_REGION=<region>`
+### Required server config
 
-### Local chunk-only mode (no S3, no merge)
+- FFmpeg installed and available in `PATH` (or set `VC_FFMPEG_PATH`).
+- AWS credentials available to the process (instance role, profile, or
+  static keys).
 
-Use this to validate chunk generation locally without changing the upload pipeline defaults:
+### Environment variables
 
-- `VC_RECORDING_MODE=segment_local`
-- `VC_RECORDING_ENGINE=ffmpeg`
-- `VC_RECORDING_CHUNK_SECONDS=5`
-- `VC_RECORDING_OUTPUT_DIR=recordings`
+| Var | Purpose | Example |
+|---|---|---|
+| `VC_RECORDING_ENABLED` | master on/off switch | `true` |
+| `VC_FFMPEG_PATH` | ffmpeg binary path | `ffmpeg` |
+| `VC_RECORDING_OUTPUT_DIR` | local scratch dir | `recordings` |
+| `VC_RECORDING_HOST_IP` | IP that the SDP advertises for plain-RTP transport | `127.0.0.1` |
+| `VC_RECORDING_BASE_PORT` | base UDP port (allocator increments by 2) | `50040` |
+| `VC_RECORDING_S3_BUCKET` | bucket for per-participant + final artifacts | `atlas-vc-recordings` |
+| `VC_RECORDING_S3_PREFIX` | key prefix inside the bucket | `recordings` |
+| `VC_RECORDING_PROCESSING_LAMBDA` | Lambda function to invoke on stop | `atlas-vc-recording-processor` |
+| `AWS_REGION` | region for S3 + Lambda clients | `ap-south-2` |
 
-Behavior:
+### S3 layout
 
-- Writes rolling `.webm` chunks to the local recording output directory.
-- Does not upload chunks to S3.
-- Mimics upload flow locally on stop: builds a local manifest and final merged file.
-- Local folder layout:
-  - `<VC_RECORDING_OUTPUT_DIR>/<sessionId>/<recordingId>/<participantId>/chunks/*.webm`
-  - `<VC_RECORDING_OUTPUT_DIR>/<sessionId>/<recordingId>/manifest.local.json`
-  - `<VC_RECORDING_OUTPUT_DIR>/<sessionId>/<recordingId>/final.local.webm`
+```
+s3://<bucket>/<prefix>/<sessionId>/<recordingId>/
+    ├── <participantA>/<recordingId>_<participantA>.webm
+    ├── <participantB>/<recordingId>_<participantB>.webm
+    ├── manifest.json
+    ├── final.mp4                    (written by Lambda)
+    └── processing-result.json       (written by Lambda)
+```
 
-Lambda handler template is included at:
+### Lambda
 
-- `lambda/recording-processor/index.js`
-- `lambda/recording-processor/README.md`
+Source lives in this repo at `lambda/recording-processor/`. Deploy with:
+
+```bash
+cd lambda/recording-processor
+zip recording-processor.zip index.js
+aws lambda update-function-code \
+  --region <region> \
+  --function-name <function-name> \
+  --zip-file fileb://recording-processor.zip
+```
 
 ## Run
 
