@@ -13,16 +13,51 @@ class SessionStore {
   constructor(idleTtlSeconds) {
     this.idleTtlSeconds = idleTtlSeconds;
     this.sessions = new Map();
+    // Chains concurrent POST /v1/sessions for the same normalized room key so
+    // find+create cannot race into duplicate sessions.
+    this._roomDedupeChain = new Map();
+  }
+
+  /**
+   * Run `fn` strictly after any other in-flight work for the same dedupe key
+   * finishes. Used around session create + room lookup. Empty key skips locking.
+   */
+  runSerializedByRoomDedupeKey(dedupeKey, fn) {
+    const key = String(dedupeKey || "").trim().toLowerCase();
+    if (!key) {
+      return Promise.resolve(fn());
+    }
+    const prior = this._roomDedupeChain.get(key) || Promise.resolve();
+    const result = prior.then(() => fn());
+    this._roomDedupeChain.set(
+      key,
+      result.then(
+        () => {},
+        () => {}
+      )
+    );
+    return result;
   }
 
   createSession({ externalRef = null, metadata = {}, ttlSeconds = 3600 }) {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
     const sessionId = `vc_sess_${uuidv7().replaceAll("-", "")}`;
+    const meta =
+      metadata && typeof metadata === "object" && !Array.isArray(metadata) ? { ...metadata } : {};
+    if (typeof meta.roomName === "string" && meta.roomName.trim()) {
+      meta.roomName = meta.roomName.trim().toLowerCase();
+    }
+    let ref = externalRef;
+    if (ref != null && String(ref).trim()) {
+      ref = String(ref).trim().toLowerCase();
+    } else {
+      ref = null;
+    }
     const session = {
       sessionId,
-      externalRef,
-      metadata,
+      externalRef: ref,
+      metadata: meta,
       status: "created",
       inviteLinks: [],
       inviteSentAt: null,
@@ -43,14 +78,25 @@ class SessionStore {
     return this.sessions.get(sessionId) || null;
   }
 
-  findSessionByRoomName(roomName) {
-    const normalized = String(roomName || "").trim().toLowerCase();
+  findSessionByRoomName(roomName, opts) {
+    return this.findSessionByRoomLookup(roomName, opts);
+  }
+
+  /** Match `metadata.roomName` or `externalRef` (case-insensitive, trimmed). */
+  findSessionByRoomLookup(lookup, { includeEnded = false } = {}) {
+    const normalized = String(lookup || "").trim().toLowerCase();
     if (!normalized) return null;
     for (const session of this.sessions.values()) {
-      const candidate = String(session?.metadata?.roomName || "").trim().toLowerCase();
-      if (candidate && candidate === normalized) {
-        return session;
-      }
+      const metaRoom = String(session?.metadata?.roomName || "").trim().toLowerCase();
+      const ext = String(session?.externalRef || "").trim().toLowerCase();
+      const matches = metaRoom === normalized || ext === normalized;
+      if (!matches) continue;
+      // Two agents picking the same room name should land in the same session,
+      // but a session that already ended must NOT be reused (it has no router /
+      // participants and would silently break joins). Callers can opt-in via
+      // includeEnded if they need historical lookups.
+      if (!includeEnded && session.status === "ended") continue;
+      return session;
     }
     return null;
   }
