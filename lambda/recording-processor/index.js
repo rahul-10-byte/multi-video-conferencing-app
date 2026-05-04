@@ -42,6 +42,63 @@ async function runProcess(binary, args, timeoutMs = 14 * 60 * 1000) {
   });
 }
 
+async function runProcessCapture(binary, args, timeoutMs = 120_000) {
+  return await new Promise((resolve, reject) => {
+    const proc = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch (_e) {}
+      reject(new Error(`process_timeout ${binary}`));
+    }, timeoutMs);
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    proc.stderr.on("data", (chunk) => {
+      stderr = `${stderr}${chunk.toString()}`.slice(-4000);
+    });
+    proc.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    proc.once("exit", (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      reject(new Error(`${binary}_failed code=${code} detail=${stderr}`));
+    });
+  });
+}
+
+function resolveFfprobePath() {
+  if (process.env.FFPROBE_PATH) return process.env.FFPROBE_PATH;
+  const dir = path.dirname(ffmpegPath);
+  return path.join(dir, "ffprobe");
+}
+
+async function probeDurationMs(localPath, ffprobePath, fallbackMs) {
+  try {
+    const { stdout } = await runProcessCapture(ffprobePath, [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      localPath
+    ]);
+    const sec = Number.parseFloat(String(stdout).trim());
+    if (Number.isFinite(sec) && sec > 0.05) {
+      return Math.round(sec * 1000);
+    }
+  } catch (err) {
+    console.warn(`[lambda] ffprobe_failed path=${localPath} error=${err?.message || err}`);
+  }
+  return Math.max(0, Math.round(Number(fallbackMs) || 0));
+}
+
 // IMPORTANT: WebM streams from the browser MediaRecorder / mediasoup pipeline
 // are VFR and contain many runs of frames with identical PTS (the 1ms
 // container tick can't fit bursty packet output). The previous chain used
@@ -58,24 +115,41 @@ async function runProcess(binary, args, timeoutMs = 14 * 60 * 1000) {
 const TPAD_TAIL = "tpad=stop_mode=clone:stop_duration=7200";
 const VIDEO_PREP = "fps=fps=24:round=near,format=yuv420p";
 
-function buildMergeArgs(participantFiles, outputFile) {
+// For each participant who joined AFTER the recording started, prepend
+// `tpad=start_duration=<sec>:start_mode=add:color=black` to video and `adelay=<ms>` to
+// audio so the merged timeline lines up: their tile only appears at their actual
+// join moment instead of being squashed back to t=0.
+function videoOffsetPrefix(joinedOffsetMs) {
+  const sec = Math.max(Number(joinedOffsetMs) || 0, 0) / 1000;
+  if (sec <= 0.05) return "";
+  return `tpad=start_duration=${sec.toFixed(3)}:start_mode=add:color=black,`;
+}
+
+function audioOffsetPrefix(joinedOffsetMs) {
+  const ms = Math.max(Math.round(Number(joinedOffsetMs) || 0), 0);
+  if (ms <= 50) return "";
+  return `adelay=${ms}|${ms},`;
+}
+
+function buildMergeArgs(participantInputs, outputFile) {
   const args = ["-loglevel", "warning"];
-  for (const input of participantFiles) {
-    args.push("-fflags", "+genpts", "-avoid_negative_ts", "make_zero", "-i", input);
+  for (const input of participantInputs) {
+    args.push("-fflags", "+genpts", "-avoid_negative_ts", "make_zero", "-i", input.localPath);
   }
-  const videoCount = participantFiles.length;
-  const audioCount = participantFiles.length;
+  const videoCount = participantInputs.length;
+  const audioCount = participantInputs.length;
   const filters = [];
+  const videoOffsets = participantInputs.map((p) => videoOffsetPrefix(p.joinedOffsetMs));
   if (videoCount === 1) {
-    filters.push(`[0:v]${VIDEO_PREP},scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]`);
+    filters.push(`[0:v]${videoOffsets[0]}${VIDEO_PREP},scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]`);
   } else if (videoCount === 2) {
-    filters.push(`[0:v]${VIDEO_PREP},scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,${TPAD_TAIL}[v0]`);
-    filters.push(`[1:v]${VIDEO_PREP},scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,${TPAD_TAIL}[v1]`);
+    filters.push(`[0:v]${videoOffsets[0]}${VIDEO_PREP},scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,${TPAD_TAIL}[v0]`);
+    filters.push(`[1:v]${videoOffsets[1]}${VIDEO_PREP},scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2,${TPAD_TAIL}[v1]`);
     filters.push("[v0][v1]hstack=inputs=2:shortest=0[vout]");
   } else {
     const capped = Math.min(videoCount, 4);
     for (let i = 0; i < capped; i += 1) {
-      filters.push(`[${i}:v]${VIDEO_PREP},scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,${TPAD_TAIL}[v${i}]`);
+      filters.push(`[${i}:v]${videoOffsets[i]}${VIDEO_PREP},scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,${TPAD_TAIL}[v${i}]`);
     }
     const joined = Array.from({ length: capped }, (_v, i) => `[v${i}]`).join("");
     const layout = capped === 3 ? "0_0|640_0|0_360" : "0_0|640_0|0_360|640_360";
@@ -83,7 +157,7 @@ function buildMergeArgs(participantFiles, outputFile) {
   }
   if (audioCount > 0) {
     const cappedAudio = Math.min(audioCount, 6);
-    const audioPrep = Array.from({ length: cappedAudio }, (_v, i) => `[${i}:a]aresample=async=1:first_pts=0[a${i}]`).join(";");
+    const audioPrep = Array.from({ length: cappedAudio }, (_v, i) => `[${i}:a]${audioOffsetPrefix(participantInputs[i].joinedOffsetMs)}aresample=async=1:first_pts=0[a${i}]`).join(";");
     filters.push(`${audioPrep};${Array.from({ length: cappedAudio }, (_v, i) => `[a${i}]`).join("")}amix=inputs=${cappedAudio}:duration=longest:dropout_transition=2[aout]`);
   }
   args.push("-filter_complex", filters.join(";"));
@@ -105,6 +179,315 @@ function buildMergeArgs(participantFiles, outputFile) {
   if (videoCount > 1) args.push("-shortest");
   args.push("-movflags", "+faststart", "-f", "mp4", outputFile);
   return args;
+}
+
+function useStaticMergeLayout() {
+  return String(process.env.VC_MERGE_LAYOUT || "dynamic").toLowerCase() === "static";
+}
+
+function collectTimelineBoundaries(participants, timelineEndMs) {
+  const raw = new Set();
+  raw.add(0);
+  raw.add(Math.max(1, Math.round(timelineEndMs)));
+  for (const p of participants) {
+    raw.add(Math.round(p.joinedOffsetMs));
+    raw.add(Math.round(p.joinedOffsetMs + p.durationMs));
+  }
+  const sorted = Array.from(raw).sort((a, b) => a - b);
+  const deduped = [];
+  for (const x of sorted) {
+    if (deduped.length === 0 || x - deduped[deduped.length - 1] > 25) {
+      deduped.push(x);
+    }
+  }
+  return deduped;
+}
+
+function activeParticipantsInInterval(participants, t0, t1) {
+  return participants.filter((p) => p.joinedOffsetMs < t1 && p.joinedOffsetMs + p.durationMs > t0);
+}
+
+async function renderIntervalClip({
+  ffmpegPath,
+  clipIndex,
+  intervalStartMs,
+  intervalEndMs,
+  actives,
+  preset,
+  crf,
+  audioBitrate,
+  tmpRoot
+}) {
+  const outPath = path.join(tmpRoot, `clip-${String(clipIndex).padStart(4, "0")}.mp4`);
+  const durationSec = (intervalEndMs - intervalStartMs) / 1000;
+  if (durationSec < 0.04) return null;
+
+  const capped = actives
+    .slice()
+    .sort(
+      (a, b) =>
+        a.joinedOffsetMs - b.joinedOffsetMs || String(a.participantId).localeCompare(String(b.participantId))
+    )
+    .slice(0, 4);
+  const n = capped.length;
+  if (n === 0) return null;
+
+  const args = ["-loglevel", "warning", "-y"];
+  for (const p of capped) {
+    args.push("-fflags", "+genpts", "-avoid_negative_ts", "make_zero", "-i", p.localPath);
+  }
+
+  const parts = [];
+  for (let i = 0; i < n; i += 1) {
+    const p = capped[i];
+    const join = p.joinedOffsetMs;
+    const startSec = Math.max(0, (intervalStartMs - join) / 1000);
+    const endSec = Math.min(p.durationMs / 1000, (intervalEndMs - join) / 1000);
+    if (endSec <= startSec + 0.02) {
+      console.warn(`[lambda] skip_interval_clip empty_trim participant=${p.participantId} t0=${intervalStartMs} t1=${intervalEndMs}`);
+      return null;
+    }
+    parts.push(
+      `[${i}:v]trim=start=${startSec.toFixed(4)}:end=${endSec.toFixed(4)},setpts=PTS-STARTPTS,${VIDEO_PREP}[vs${i}]`
+    );
+    parts.push(
+      `[${i}:a]atrim=start=${startSec.toFixed(4)}:end=${endSec.toFixed(4)},asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0[as${i}]`
+    );
+  }
+
+  if (n === 1) {
+    parts.push(
+      `[vs0]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[vout]`
+    );
+    parts.push(`[as0]aformat=sample_rates=48000:sample_fmts=fltp:channel_layouts=stereo[aout]`);
+  } else if (n === 2) {
+    parts.push(
+      `[vs0]scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2[c0];[vs1]scale=640:720:force_original_aspect_ratio=decrease,pad=640:720:(ow-iw)/2:(oh-ih)/2[c1]`
+    );
+    parts.push(`[c0][c1]hstack=inputs=2:shortest=1[vout]`);
+    parts.push(`[as0][as1]amix=inputs=2:duration=first:dropout_transition=2[aout]`);
+  } else {
+    const nc = n;
+    const scales = [];
+    for (let i = 0; i < nc; i += 1) {
+      scales.push(
+        `[vs${i}]scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2[c${i}]`
+      );
+    }
+    parts.push(scales.join(";"));
+    const joined = Array.from({ length: nc }, (_v, i) => `[c${i}]`).join("");
+    const layout = nc === 3 ? "0_0|640_0|0_360" : "0_0|640_0|0_360|640_360";
+    parts.push(`${joined}xstack=inputs=${nc}:layout=${layout}:fill=black:shortest=1[vout]`);
+    const astr = Array.from({ length: nc }, (_v, i) => `[as${i}]`).join("");
+    parts.push(`${astr}amix=inputs=${nc}:duration=first:dropout_transition=2[aout]`);
+  }
+
+  args.push("-filter_complex", parts.join(";"));
+  args.push(
+    "-map",
+    "[vout]",
+    "-c:v",
+    "libx264",
+    "-preset",
+    preset,
+    "-crf",
+    crf,
+    "-pix_fmt",
+    "yuv420p",
+    "-profile:v",
+    "high",
+    "-level",
+    "4.0",
+    "-map",
+    "[aout]",
+    "-c:a",
+    "aac",
+    "-b:a",
+    audioBitrate,
+    "-t",
+    durationSec.toFixed(4),
+    "-movflags",
+    "+faststart",
+    "-f",
+    "mp4",
+    outPath
+  );
+
+  await runProcess(ffmpegPath, args);
+  return outPath;
+}
+
+async function concatMp4Clips(ffmpegPath, clipPaths, outputFile, timeoutMs) {
+  if (clipPaths.length === 0) throw new Error("no_clips_to_concat");
+  if (clipPaths.length === 1) {
+    await fsp.copyFile(clipPaths[0], outputFile);
+    return;
+  }
+  const preset = String(process.env.MP4_PRESET || "ultrafast");
+  const crf = String(process.env.MP4_CRF || "23");
+  const audioBitrate = String(process.env.MP4_AUDIO_BITRATE || "128k");
+  const args = ["-loglevel", "warning", "-y"];
+  for (const c of clipPaths) {
+    args.push("-i", c);
+  }
+  const pairs = [];
+  for (let i = 0; i < clipPaths.length; i += 1) {
+    pairs.push(`[${i}:v][${i}:a]`);
+  }
+  const fc = `${pairs.join("")}concat=n=${clipPaths.length}:v=1:a=1[v][a]`;
+  args.push("-filter_complex", fc);
+  args.push(
+    "-map",
+    "[v]",
+    "-map",
+    "[a]",
+    "-c:v",
+    "libx264",
+    "-preset",
+    preset,
+    "-crf",
+    crf,
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "aac",
+    "-b:a",
+    audioBitrate,
+    "-movflags",
+    "+faststart",
+    outputFile
+  );
+  await runProcess(ffmpegPath, args, timeoutMs);
+}
+
+async function runDynamicTimelineMerge({ participantInputs, manifest, tmpRoot, finalOutput }) {
+  const ffprobePath = resolveFfprobePath();
+  const recordingDurationMs = Number.isFinite(Number(manifest.durationMs)) ? Number(manifest.durationMs) : 0;
+
+  for (const p of participantInputs) {
+    const fallback = Math.max(0, recordingDurationMs - p.joinedOffsetMs);
+    p.durationMs = await probeDurationMs(p.localPath, ffprobePath, fallback);
+    if (p.durationMs < 200 && recordingDurationMs > p.joinedOffsetMs + 200) {
+      p.durationMs = Math.max(p.durationMs, recordingDurationMs - p.joinedOffsetMs);
+    }
+  }
+
+  const ends = participantInputs.map((p) => p.joinedOffsetMs + p.durationMs);
+  const timelineEndMs = Math.max(recordingDurationMs || 0, ...ends, 500);
+
+  const boundaries = collectTimelineBoundaries(participantInputs, timelineEndMs);
+  const preset = String(process.env.MP4_PRESET || "ultrafast");
+  const crf = String(process.env.MP4_CRF || "23");
+  const audioBitrate = String(process.env.MP4_AUDIO_BITRATE || "128k");
+
+  const clipPaths = [];
+  let clipIndex = 0;
+
+  for (let b = 0; b < boundaries.length - 1; b += 1) {
+    const t0 = boundaries[b];
+    const t1 = boundaries[b + 1];
+    if (t1 - t0 < 40) continue;
+
+    let actives = activeParticipantsInInterval(participantInputs, t0, t1);
+    if (actives.length === 0) continue;
+    if (actives.length > 4) {
+      console.warn(`[lambda] interval_cap t0=${t0} t1=${t1} count=${actives.length}`);
+      actives = actives
+        .slice()
+        .sort(
+          (a, b) =>
+            a.joinedOffsetMs - b.joinedOffsetMs || String(a.participantId).localeCompare(String(b.participantId))
+        )
+        .slice(0, 4);
+    }
+
+    const clip = await renderIntervalClip({
+      ffmpegPath,
+      clipIndex,
+      intervalStartMs: t0,
+      intervalEndMs: t1,
+      actives,
+      preset,
+      crf,
+      audioBitrate,
+      tmpRoot
+    });
+    if (clip) {
+      clipPaths.push(clip);
+      clipIndex += 1;
+    }
+  }
+
+  if (clipPaths.length === 0) {
+    throw new Error("dynamic_merge_no_clips");
+  }
+
+  await concatMp4Clips(ffmpegPath, clipPaths, finalOutput, 14 * 60 * 1000);
+  console.log(
+    `[lambda] dynamic_merge_done clips=${clipPaths.length} timelineEndMs=${timelineEndMs} boundaries=${boundaries.length}`
+  );
+  return { mergeLayout: "dynamic", intervalClipCount: clipPaths.length };
+}
+
+async function buildParticipantInputsForMerge(bucket, segments, tmpRoot) {
+  if (useStaticMergeLayout()) {
+    const byParticipant = new Map();
+    for (const seg of segments) {
+      if (!seg?.key) continue;
+      const participantId = String(seg.participantId || "unknown");
+      const list = byParticipant.get(participantId) || [];
+      list.push(seg);
+      byParticipant.set(participantId, list);
+    }
+    if (byParticipant.size === 0) throw new Error("manifest_has_no_valid_segment_keys");
+    const participantInputs = [];
+    for (const [participantId, participantSegments] of byParticipant.entries()) {
+      participantSegments.sort((a, b) => Number(b.sizeBytes || 0) - Number(a.sizeBytes || 0));
+      const seg = participantSegments[0];
+      const safeId = participantId.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const localFile = path.join(tmpRoot, `${safeId}.webm`);
+      await downloadToFile(bucket, seg.key, localFile);
+      const stat = await fsp.stat(localFile);
+      const joinedOffsetMs = Number.isFinite(Number(seg.joinedOffsetMs)) ? Number(seg.joinedOffsetMs) : 0;
+      console.log(
+        `[lambda] segment_downloaded layout=static participant=${participantId} sizeBytes=${stat.size} joinedOffsetMs=${joinedOffsetMs}`
+      );
+      participantInputs.push({ participantId, localPath: localFile, joinedOffsetMs });
+    }
+    participantInputs.sort(
+      (a, b) => a.joinedOffsetMs - b.joinedOffsetMs || String(a.participantId).localeCompare(String(b.participantId))
+    );
+    return participantInputs;
+  }
+
+  const flat = segments.filter((s) => s?.key);
+  if (flat.length === 0) throw new Error("manifest_has_no_valid_segment_keys");
+  flat.sort((a, b) => {
+    const ja = Number.isFinite(Number(a.joinedOffsetMs)) ? Number(a.joinedOffsetMs) : 0;
+    const jb = Number.isFinite(Number(b.joinedOffsetMs)) ? Number(b.joinedOffsetMs) : 0;
+    if (ja !== jb) return ja - jb;
+    return String(a.key).localeCompare(String(b.key));
+  });
+  const participantInputs = [];
+  for (let i = 0; i < flat.length; i += 1) {
+    const seg = flat[i];
+    const participantId = String(seg.participantId || "unknown");
+    const safeId = participantId.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const localFile = path.join(tmpRoot, `s${i}_${safeId}.webm`);
+    await downloadToFile(bucket, seg.key, localFile);
+    const stat = await fsp.stat(localFile);
+    const joinedOffsetMs = Number.isFinite(Number(seg.joinedOffsetMs)) ? Number(seg.joinedOffsetMs) : 0;
+    console.log(
+      `[lambda] segment_downloaded layout=dynamic_row participant=${participantId} idx=${i} sizeBytes=${stat.size} joinedOffsetMs=${joinedOffsetMs}`
+    );
+    participantInputs.push({
+      participantId,
+      localPath: localFile,
+      joinedOffsetMs,
+      manifestKey: seg.key
+    });
+  }
+  return participantInputs;
 }
 
 async function downloadToFile(bucket, key, localPath) {
@@ -156,41 +539,22 @@ exports.handler = async (event) => {
       `[lambda] manifest_loaded sessionId=${manifest.sessionId || "?"} recordingId=${manifest.recordingId || "?"} segments=${segments.length}`
     );
 
-    // segment_upload_mp4 mode emits exactly one .webm per participant. If we
-    // ever receive more than one segment for a participant (legacy data),
-    // pick the largest one — falling back to a stable order so the merge
-    // stays deterministic.
-    const byParticipant = new Map();
-    for (const seg of segments) {
-      if (!seg?.key) continue;
-      const participantId = String(seg.participantId || "unknown");
-      const list = byParticipant.get(participantId) || [];
-      list.push(seg);
-      byParticipant.set(participantId, list);
-    }
-    if (byParticipant.size === 0) throw new Error("manifest_has_no_valid_segment_keys");
-
-    const participantFiles = [];
-    for (const [participantId, participantSegments] of byParticipant.entries()) {
-      participantSegments.sort((a, b) => Number(b.sizeBytes || 0) - Number(a.sizeBytes || 0));
-      const seg = participantSegments[0];
-      const localFile = path.join(tmpRoot, `${participantId}.webm`);
-      await downloadToFile(bucket, seg.key, localFile);
-      const stat = await fsp.stat(localFile);
-      console.log(
-        `[lambda] segment_downloaded participant=${participantId} sizeBytes=${stat.size}`
-      );
-      participantFiles.push(localFile);
-    }
+    const participantInputs = await buildParticipantInputsForMerge(bucket, segments, tmpRoot);
 
     const finalOutput = path.join(tmpRoot, "final-merged.mp4");
-    const mergeArgs = buildMergeArgs(participantFiles, finalOutput);
-    console.log(`[lambda] merge_started participants=${participantFiles.length}`);
     const mergeStartMs = Date.now();
-    await runProcess(ffmpegPath, mergeArgs);
+    let mergeMeta = { mergeLayout: "static", intervalClipCount: 1 };
+    if (useStaticMergeLayout()) {
+      const mergeArgs = buildMergeArgs(participantInputs, finalOutput);
+      console.log(`[lambda] merge_started layout=static participants=${participantInputs.length}`);
+      await runProcess(ffmpegPath, mergeArgs);
+    } else {
+      console.log(`[lambda] merge_started layout=dynamic participants=${participantInputs.length}`);
+      mergeMeta = await runDynamicTimelineMerge({ participantInputs, manifest, tmpRoot, finalOutput });
+    }
     const finalStat = await fsp.stat(finalOutput);
     console.log(
-      `[lambda] merge_complete durationMs=${Date.now() - mergeStartMs} outputBytes=${finalStat.size}`
+      `[lambda] merge_complete layout=${mergeMeta.mergeLayout} clips=${mergeMeta.intervalClipCount} durationMs=${Date.now() - mergeStartMs} outputBytes=${finalStat.size}`
     );
 
     const finalKey = buildFinalKey(manifestKey);
@@ -212,8 +576,10 @@ exports.handler = async (event) => {
       sessionId: manifest.sessionId || null,
       manifestKey,
       finalKey,
-      participantCount: participantFiles.length,
-      segmentCount: segments.length
+      participantCount: participantInputs.length,
+      segmentCount: segments.length,
+      mergeLayout: mergeMeta.mergeLayout,
+      intervalClipCount: mergeMeta.intervalClipCount
     };
     await uploadJson(bucket, resultKey, result);
     console.log(
