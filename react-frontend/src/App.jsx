@@ -1873,11 +1873,22 @@ export default function App() {
       }
 
       if (sessionId) {
-        await requestJson(backendUrl, `/v1/sessions/${sessionId}/leave`, {
-          method: 'POST',
-          body: { participantId: currentParticipantId },
-          apiKey,
-        });
+        if (currentParticipantId) {
+          await requestJson(
+            backendUrl,
+            `/v1/sessions/${sessionId}/participants/${encodeURIComponent(currentParticipantId)}/leave`,
+            {
+              method: 'POST',
+              apiKey,
+            },
+          );
+        } else {
+          // Fallback for legacy links without participant context.
+          await requestJson(backendUrl, `/v1/sessions/${sessionId}/leave`, {
+            method: 'POST',
+            apiKey,
+          });
+        }
       }
     } finally {
       setMessages(initialMessages);

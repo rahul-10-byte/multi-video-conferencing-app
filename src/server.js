@@ -299,6 +299,35 @@ app.post("/v1/sessions/:sessionId/leave", requireApiKey, async (req, res) => {
   res.json({ sessionId, status: session.status, endedAt: new Date().toISOString() });
 });
 
+app.post("/v1/sessions/:sessionId/participants/:participantId/leave", requireApiKey, async (req, res) => {
+  const { sessionId, participantId } = req.params;
+  const session = sessionStore.getSession(sessionId);
+  if (!session) {
+    res.status(404).json({ error: "session_not_found" });
+    return;
+  }
+  const participant = (sessionStore.listParticipants(sessionId) || []).find((p) => p.participantId === participantId);
+  if (!participant) {
+    res.status(404).json({ error: "participant_not_found" });
+    return;
+  }
+  mediasoupService.closeParticipant(sessionId, participantId);
+  await recordingService.releaseParticipantSegmentSlot(sessionId, participantId);
+  sessionStore.removeParticipant(sessionId, participantId);
+  await readModel?.upsertSession(sessionStore.getSession(sessionId));
+  await eventBus.emit("participant_left", {
+    sessionId,
+    participantId,
+    role: participant.role || "unknown",
+    reason: "api_participant_leave"
+  });
+  res.json({
+    sessionId,
+    participantId,
+    leftAt: new Date().toISOString()
+  });
+});
+
 app.post("/v1/sessions/:sessionId/recording/start", requireApiKey, async (req, res) => {
   const { sessionId } = req.params;
   const { initiatedBy = "system" } = req.body || {};

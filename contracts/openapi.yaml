@@ -245,6 +245,36 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/sessions/{sessionId}/participants/{participantId}/leave:
+    post:
+      tags: [sessions]
+      summary: Remove one participant from a live session
+      description: |
+        Participant-scoped leave. Closes that participant's mediasoup resources,
+        releases their recording slot (if recording is active), and keeps the
+        session alive for remaining participants.
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - in: path
+          name: participantId
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Participant removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParticipantLeaveResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Session or participant not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/sessions/{sessionId}/customer-invite:
     post:
       tags: [invite]
@@ -654,6 +684,14 @@ components:
         sessionId: { type: string }
         status: { type: string, enum: [ended] }
         endedAt: { type: string, format: date-time }
+
+    ParticipantLeaveResponse:
+      type: object
+      required: [sessionId, participantId, leftAt]
+      properties:
+        sessionId: { type: string }
+        participantId: { type: string }
+        leftAt: { type: string, format: date-time }
 
     CustomerInviteResponse:
       type: object
