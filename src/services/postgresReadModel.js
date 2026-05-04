@@ -45,6 +45,9 @@ class PostgresReadModel {
         session_id TEXT NOT NULL,
         state TEXT NOT NULL,
         storage_uri TEXT,
+        manifest_key TEXT,
+        initiated_by TEXT,
+        stopped_by TEXT,
         started_at TIMESTAMPTZ NOT NULL,
         stopped_at TIMESTAMPTZ,
         duration_ms BIGINT,
@@ -54,8 +57,26 @@ class PostgresReadModel {
       );
     `);
     await this.pool.query(`
+      ALTER TABLE vc_recordings ADD COLUMN IF NOT EXISTS manifest_key TEXT;
+    `);
+    await this.pool.query(`
+      ALTER TABLE vc_recordings ADD COLUMN IF NOT EXISTS initiated_by TEXT;
+    `);
+    await this.pool.query(`
+      ALTER TABLE vc_recordings ADD COLUMN IF NOT EXISTS stopped_by TEXT;
+    `);
+    await this.pool.query(`
       CREATE INDEX IF NOT EXISTS idx_vc_recordings_session_started_at
       ON vc_recordings (session_id, started_at DESC);
+    `);
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_vc_recordings_state
+      ON vc_recordings (state);
+    `);
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_vc_recordings_manifest_key
+      ON vc_recordings (manifest_key)
+      WHERE manifest_key IS NOT NULL;
     `);
 
     await this.pool.query(`
@@ -168,11 +189,14 @@ class PostgresReadModel {
     await this.pool.query(
       `
       INSERT INTO vc_recordings
-      (recording_id, session_id, state, storage_uri, started_at, stopped_at, duration_ms, size_bytes, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+      (recording_id, session_id, state, storage_uri, manifest_key, initiated_by, stopped_by, started_at, stopped_at, duration_ms, size_bytes, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
       ON CONFLICT (recording_id) DO UPDATE SET
         state = EXCLUDED.state,
         storage_uri = EXCLUDED.storage_uri,
+        manifest_key = EXCLUDED.manifest_key,
+        initiated_by = EXCLUDED.initiated_by,
+        stopped_by = EXCLUDED.stopped_by,
         stopped_at = EXCLUDED.stopped_at,
         duration_ms = EXCLUDED.duration_ms,
         size_bytes = EXCLUDED.size_bytes,
@@ -183,6 +207,9 @@ class PostgresReadModel {
         recording.sessionId,
         recording.state,
         recording.storageUri || null,
+        recording.manifestKey || null,
+        recording.initiatedBy || null,
+        recording.stoppedBy || null,
         recording.startedAt,
         recording.stoppedAt || null,
         recording.durationMs || null,

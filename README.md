@@ -22,7 +22,6 @@ change the wire format.
   - `POST /v1/sessions`
   - `POST /v1/sessions/{sessionId}/join-token`
   - `POST /v1/sessions/{sessionId}/customer-invite`
-  - `POST /v1/sessions/{sessionId}/customer-verify-otp`
   - `GET /v1/ice-servers`
   - `GET /v1/sessions/{sessionId}/participants`
   - `POST /v1/sessions/{sessionId}/leave`
@@ -53,16 +52,15 @@ change the wire format.
 - Admin read-model endpoints:
   - `GET /v1/admin/sessions`
   - `GET /v1/admin/sessions/{sessionId}/events`
-- Lean SQL read-model tables:
+- Lean SQL read-model tables (see `db/schema.sql`):
   - `vc_sessions` (includes `invite_links`)
-  - `vc_recordings`
+  - `vc_recordings` (`manifest_key`, initiator/stopper, indexes on `state` / manifest)
   - `vc_dispositions`
   - `vc_session_events`
 
 ## Not yet implemented
 
 - TURN REST short-lived credential issuance.
-- Production OTP/SMS/email provider integration (current OTP is in-memory test mode).
 
 ## Recording
 
