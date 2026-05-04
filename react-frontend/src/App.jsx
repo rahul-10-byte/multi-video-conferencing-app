@@ -551,8 +551,6 @@ function LandingScreen({
   setParticipantId,
   role,
   setRole,
-  otpCode,
-  setOtpCode,
   joinStatus,
   joinError,
   onJoin,
@@ -597,12 +595,6 @@ function LandingScreen({
               <option value="customer">customer</option>
             </select>
           </label>
-          {role === 'customer' ? (
-            <label>
-              OTP code
-              <input value={otpCode} onChange={(event) => setOtpCode(event.target.value)} placeholder="123456" />
-            </label>
-          ) : null}
         </div>
 
         {joinError ? <p className="field-error">{joinError}</p> : null}
@@ -889,7 +881,6 @@ export default function App() {
   const [participantName, setParticipantName] = useState('');
   const [participantId, setParticipantId] = useState('');
   const [role, setRole] = useState('agent');
-  const [otpCode, setOtpCode] = useState('');
   const [joinStatus, setJoinStatus] = useState('Ready');
   const [joinError, setJoinError] = useState('');
   const [connectionState, setConnectionState] = useState('Disconnected');
@@ -1170,26 +1161,30 @@ export default function App() {
     stopLocalMedia();
   }
 
+  function canonicalRoomKey(room) {
+    return String(room || '').trim().toLowerCase();
+  }
+
   async function resolveRoom(room) {
-    const trimmedRoomName = String(room || '').trim();
-    if (!trimmedRoomName) {
+    const key = canonicalRoomKey(room);
+    if (!key) {
       throw new Error('room_name_required');
     }
-    const resolved = await requestJson(backendUrl, `/v1/sessions/resolve?roomName=${encodeURIComponent(trimmedRoomName)}`);
+    const resolved = await requestJson(backendUrl, `/v1/sessions/resolve?roomName=${encodeURIComponent(key)}`);
     return resolved.sessionId;
   }
 
   async function createRoom(room) {
-    const trimmedRoomName = String(room || '').trim();
-    if (!trimmedRoomName) {
+    const key = canonicalRoomKey(room);
+    if (!key) {
       throw new Error('room_name_required');
     }
     const created = await requestJson(backendUrl, '/v1/sessions', {
       method: 'POST',
       body: {
-        externalRef: trimmedRoomName,
+        externalRef: key,
         metadata: {
-          roomName: trimmedRoomName,
+          roomName: key,
           displayName: participantName,
         },
       },
@@ -1197,17 +1192,7 @@ export default function App() {
     return created.sessionId;
   }
 
-  async function issueJoinToken(sessionId, joinedParticipantId, joinedRole) {
-    if (joinedRole === 'customer') {
-      await requestJson(backendUrl, `/v1/sessions/${sessionId}/customer-verify-otp`, {
-        method: 'POST',
-        body: {
-          participantId: joinedParticipantId,
-          otp: otpCode,
-        },
-      });
-    }
-
+  async function issueJoinToken(sessionId, joinedParticipantId) {
     return requestJson(backendUrl, `/v1/sessions/${sessionId}/join-token`, {
       method: 'POST',
       body: {
@@ -1526,7 +1511,7 @@ export default function App() {
         socketRef.current = null;
       }
       clearMediaTransportState();
-      const joinToken = await issueJoinToken(meta.sessionId, meta.participantId, meta.role);
+      const joinToken = await issueJoinToken(meta.sessionId, meta.participantId);
       await connectMeeting(joinToken, meta.sessionId, meta.participantId, meta.role, meta.roomName);
     } catch (_error) {
       clearReconnectTimer();
@@ -1542,20 +1527,26 @@ export default function App() {
       reconnectingRef.current = false;
       reconnectAttemptRef.current = 0;
       setJoinError('');
-      const trimmedRoomName = String(roomName || '').trim();
+      const canonicalRoomName = canonicalRoomKey(roomName);
+      if (!canonicalRoomName) {
+        setJoinError('room_name_required');
+        setJoinStatus('Ready');
+        return;
+      }
+      setRoomName(canonicalRoomName);
       const joinedParticipantId = slugifyParticipantId(participantId || participantName);
       setParticipantId(joinedParticipantId);
       setJoinStatus(mode === 'create' ? 'Creating room...' : 'Joining room...');
 
-      const sessionId = mode === 'create' ? await createRoom(trimmedRoomName) : await resolveRoom(trimmedRoomName);
+      const sessionId = mode === 'create' ? await createRoom(canonicalRoomName) : await resolveRoom(canonicalRoomName);
       connectionMetaRef.current = {
         sessionId,
         participantId: joinedParticipantId,
         role,
-        roomName: trimmedRoomName,
+        roomName: canonicalRoomName,
       };
-      const joinToken = await issueJoinToken(sessionId, joinedParticipantId, role);
-      await connectMeeting(joinToken, sessionId, joinedParticipantId, role, trimmedRoomName);
+      const joinToken = await issueJoinToken(sessionId, joinedParticipantId);
+      await connectMeeting(joinToken, sessionId, joinedParticipantId, role, canonicalRoomName);
     } catch (error) {
       setJoinError(error.message || 'failed_to_join');
       setJoinStatus('Ready');
@@ -1924,7 +1915,7 @@ export default function App() {
         response?.invite?.url ||
         fallbackLink;
       setInviteLink(resolvedInviteLink);
-      setInviteResult(`Invite link ready. OTP: ${response.otp?.code || 'n/a'}`);
+      setInviteResult('Invite link ready.');
       setInviteOpen(true);
     } catch (error) {
       setInviteResult(error.message || 'invite_failed');
@@ -1969,8 +1960,6 @@ export default function App() {
         setParticipantId={setParticipantId}
         role={role}
         setRole={setRole}
-        otpCode={otpCode}
-        setOtpCode={setOtpCode}
         joinStatus={joinStatus}
         joinError={joinError}
         onJoin={handleJoin}

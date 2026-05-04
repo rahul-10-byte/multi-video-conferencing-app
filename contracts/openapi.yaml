@@ -4,7 +4,7 @@ info:
   version: 1.1.0
   description: |
     Mediasoup-based video-call backend. Covers session lifecycle, join-token
-    issuance, ICE servers, customer OTP invite flow, recording start/stop,
+    issuance, ICE servers, customer invite links, recording start/stop,
     session disposition, and admin read-model endpoints.
 
     All `/v1/*` mutating routes (and most read routes) require an API key
@@ -85,6 +85,11 @@ paths:
     post:
       tags: [sessions]
       summary: Create a new session
+      description: |
+        Concurrent creates for the same room key (from `metadata.roomName` or
+        `externalRef`, trimmed and case-insensitive) return the existing session
+        with HTTP 200 and `deduplicated: true`. Stored `metadata.roomName` and
+        `externalRef` are normalized to lowercase.
       security: []
       requestBody:
         required: false
@@ -107,8 +112,9 @@ paths:
       tags: [sessions]
       summary: Resolve a session id by stable room name
       description: |
-        Looks up an existing session whose `metadata.roomName` matches the
-        supplied query argument. Returns a minimal session header.
+        Looks up an existing session whose `metadata.roomName` or `externalRef`
+        matches the supplied query argument (trimmed, case-insensitive). Returns
+        a minimal session header. New sessions store room keys in lowercase.
       security: []
       parameters:
         - in: query
@@ -158,8 +164,7 @@ paths:
       summary: Issue a participant join token
       description: |
         Returns a short-lived JWT used to authenticate the WebSocket
-        `join` event. For `role=customer` the participant must have a
-        successful `customer-verify-otp` first.
+        `join` event.
       parameters:
         - $ref: "#/components/parameters/SessionId"
       requestBody:
@@ -179,12 +184,6 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "403":
-          description: OTP verification required for customer role
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -249,11 +248,9 @@ paths:
   /v1/sessions/{sessionId}/customer-invite:
     post:
       tags: [invite]
-      summary: Issue an OTP-protected customer invite link
+      summary: Issue a customer invite link
       description: |
-        Generates a one-time-passcode challenge for the customer and
-        records an invite link on the session. In test mode the OTP is
-        echoed back in the response (`otp.testMode=true`).
+        Records an invite link on the session for the given participant.
       parameters:
         - $ref: "#/components/parameters/SessionId"
       requestBody:
@@ -277,51 +274,6 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-
-  /v1/sessions/{sessionId}/customer-verify-otp:
-    post:
-      tags: [invite]
-      summary: Verify a customer's OTP
-      security: []
-      parameters:
-        - $ref: "#/components/parameters/SessionId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [participantId, otp]
-              properties:
-                participantId: { type: string }
-                otp: { type: string }
-      responses:
-        "200":
-          description: Verified
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [sessionId, participantId, verified, verifiedAt]
-                properties:
-                  sessionId: { type: string }
-                  participantId: { type: string }
-                  verified: { type: boolean, enum: [true] }
-                  verifiedAt: { type: string, format: date-time }
-        "400":
-          description: Invalid input or wrong OTP
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/Error"
-                  - type: object
-                    properties:
-                      attemptsLeft:
-                        type: integer
-                        nullable: true
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -705,21 +657,12 @@ components:
 
     CustomerInviteResponse:
       type: object
-      required: [sessionId, participantId, inviteLink, sentAt, otp]
+      required: [sessionId, participantId, inviteLink, sentAt]
       properties:
         sessionId: { type: string }
         participantId: { type: string }
         inviteLink: { type: string }
         sentAt: { type: string, format: date-time }
-        otp:
-          type: object
-          required: [testMode, code, expiresAt]
-          properties:
-            testMode: { type: boolean }
-            code:
-              type: string
-              description: Only populated in test mode.
-            expiresAt: { type: string, format: date-time }
 
     Disposition:
       type: object

@@ -31,7 +31,10 @@ function startServerForTest(port, reconnectGraceSeconds = 1) {
     VC_WS_URL: `ws://127.0.0.1:${port}/v1/ws`,
     VC_RECONNECT_GRACE_SECONDS: String(reconnectGraceSeconds),
     VC_RECONNECT_CLEANUP_POLL_SECONDS: "1",
-    VC_RECONNECT_CLEANUP_BATCH_SIZE: "50"
+    VC_RECONNECT_CLEANUP_BATCH_SIZE: "50",
+    // Tests should not require an external Postgres. Force the read model off
+    // regardless of any DATABASE_URL the developer has in their local .env.
+    DATABASE_URL: ""
   };
   const child = spawn(process.execPath, ["src/server.js"], {
     cwd: process.cwd(),
@@ -190,7 +193,7 @@ test("echoes requestId on websocket error responses", async (t) => {
   assert.equal(getStderr(), "");
 });
 
-test("requires OTP verification before issuing customer join token", async (t) => {
+test("issues customer join token without pre-step", async (t) => {
   const port = randomPort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const { child, getStderr } = startServerForTest(port);
@@ -209,35 +212,14 @@ test("requires OTP verification before issuing customer join token", async (t) =
   const created = await createdRes.json();
   const sessionId = created.sessionId;
 
-  const blockedTokenRes = await fetch(`${baseUrl}/v1/sessions/${sessionId}/join-token`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ participantId: "customer-otp-1", role: "customer" })
-  });
-  assert.equal(blockedTokenRes.status, 403);
-
-  const inviteRes = await fetch(`${baseUrl}/v1/sessions/${sessionId}/customer-invite`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ participantId: "customer-otp-1", channel: "sms" })
-  });
-  assert.equal(inviteRes.status, 200);
-  const invite = await inviteRes.json();
-  assert.equal(invite.otp.code, "123456");
-
-  const verifyRes = await fetch(`${baseUrl}/v1/sessions/${sessionId}/customer-verify-otp`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ participantId: "customer-otp-1", otp: "123456" })
-  });
-  assert.equal(verifyRes.status, 200);
-
   const tokenRes = await fetch(`${baseUrl}/v1/sessions/${sessionId}/join-token`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ participantId: "customer-otp-1", role: "customer" })
+    body: JSON.stringify({ participantId: "customer-1", role: "customer" })
   });
   assert.equal(tokenRes.status, 200);
+  const tokenBody = await tokenRes.json();
+  assert.ok(tokenBody.token);
   assert.equal(getStderr(), "");
 });
 
@@ -291,6 +273,114 @@ test("supports recording start/stop and session disposition endpoints", async (t
   assert.equal(dispositionRes.status, 200);
   const disposition = await dispositionRes.json();
   assert.equal(disposition.disposition.outcome, "resolved");
+  assert.equal(getStderr(), "");
+});
+
+test("dedupes session creation when two agents pick the same room name", async (t) => {
+  const port = randomPort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const { child, getStderr } = startServerForTest(port);
+
+  t.after(() => {
+    child.kill("SIGTERM");
+  });
+
+  await waitForHealthy(baseUrl);
+
+  const roomName = `room-${Date.now()}`;
+  const createBody = JSON.stringify({ metadata: { roomName } });
+
+  const firstRes = await fetch(`${baseUrl}/v1/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: createBody
+  });
+  assert.equal(firstRes.status, 201);
+  const first = await firstRes.json();
+  assert.ok(first.sessionId);
+
+  const secondRes = await fetch(`${baseUrl}/v1/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: createBody
+  });
+  assert.equal(secondRes.status, 200);
+  const second = await secondRes.json();
+  assert.equal(second.sessionId, first.sessionId);
+  assert.equal(second.deduplicated, true);
+
+  const resolveRes = await fetch(`${baseUrl}/v1/sessions/resolve?roomName=${encodeURIComponent(roomName)}`);
+  assert.equal(resolveRes.status, 200);
+  const resolved = await resolveRes.json();
+  assert.equal(resolved.sessionId, first.sessionId);
+
+  assert.equal(getStderr(), "");
+});
+
+test("resolve matches room name case-insensitively", async (t) => {
+  const port = randomPort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const { child, getStderr } = startServerForTest(port);
+
+  t.after(() => {
+    child.kill("SIGTERM");
+  });
+
+  await waitForHealthy(baseUrl);
+
+  const mixed = `CaSe-${Date.now()}-Xy`;
+  const createRes = await fetch(`${baseUrl}/v1/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ metadata: { roomName: mixed.toUpperCase() } })
+  });
+  assert.equal(createRes.status, 201);
+  const created = await createRes.json();
+
+  const resolveRes = await fetch(
+    `${baseUrl}/v1/sessions/resolve?roomName=${encodeURIComponent(mixed.toLowerCase())}`
+  );
+  assert.equal(resolveRes.status, 200);
+  const resolved = await resolveRes.json();
+  assert.equal(resolved.sessionId, created.sessionId);
+
+  assert.equal(getStderr(), "");
+});
+
+test("dedupes concurrent session creation for the same room name", async (t) => {
+  const port = randomPort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const { child, getStderr } = startServerForTest(port);
+
+  t.after(() => {
+    child.kill("SIGTERM");
+  });
+
+  await waitForHealthy(baseUrl);
+
+  const roomName = `room-concurrent-${Date.now()}`;
+  const createBody = JSON.stringify({ metadata: { roomName } });
+
+  const [aRes, bRes] = await Promise.all([
+    fetch(`${baseUrl}/v1/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: createBody
+    }),
+    fetch(`${baseUrl}/v1/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: createBody
+    })
+  ]);
+
+  const aJson = await aRes.json();
+  const bJson = await bRes.json();
+  assert.equal(aJson.sessionId, bJson.sessionId);
+  const statuses = [aRes.status, bRes.status].sort((x, y) => x - y);
+  assert.deepEqual(statuses, [200, 201]);
+  assert.equal(aJson.deduplicated === true || bJson.deduplicated === true, true);
+
   assert.equal(getStderr(), "");
 });
 

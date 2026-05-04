@@ -13,7 +13,6 @@ const {
 const { MediasoupService } = require("./services/mediasoupService");
 const { EventBus } = require("./services/eventBus");
 const { PostgresReadModel } = require("./services/postgresReadModel");
-const { OtpService } = require("./services/otpService");
 const { RecordingService } = require("./services/recordingService");
 const { RecordingPipelineService } = require("./services/recordingPipelineService");
 const { setupWebSocketServer } = require("./ws");
@@ -51,11 +50,6 @@ let reconnectStore = new InMemoryReconnectStore();
 let tokenService = new TokenService(config, replayStore);
 let eventBus = new EventBus();
 let readModel = null;
-const otpService = new OtpService({
-  ttlSeconds: config.otpTtlSeconds,
-  maxAttempts: config.otpMaxAttempts,
-  fixedCode: config.testOtpCode
-});
 const recordingPipelineService = new RecordingPipelineService(config.recording);
 const recordingService = new RecordingService(config.recording);
 const nodeId = `node_${uuidv7().replaceAll("-", "")}`;
@@ -115,15 +109,55 @@ app.post("/v1/sessions", async (req, res) => {
     res.status(400).json({ error: "invalid_metadata" });
     return;
   }
-  const session = sessionStore.createSession({ externalRef, metadata, ttlSeconds });
-  await readModel?.upsertSession(session);
-  await eventBus.emit("session_created", { sessionId: session.sessionId, data: { metadata, externalRef } });
-  res.status(201).json({
-    sessionId: session.sessionId,
-    status: session.status,
-    createdAt: session.createdAt,
-    expiresAt: session.expiresAt
-  });
+
+  // Idempotency on metadata.roomName / externalRef: concurrent "Create room"
+  // clicks with the same name must serialize so find+create cannot race into
+  // two separate sessions.
+  const roomNameMeta = String(metadata?.roomName || "").trim();
+  const extRefStr = String(externalRef || "").trim();
+  const lookup = roomNameMeta || extRefStr;
+  const dedupeKey = lookup.toLowerCase();
+
+  try {
+    const outcome = await sessionStore.runSerializedByRoomDedupeKey(dedupeKey, () => {
+      if (lookup) {
+        const existing = sessionStore.findSessionByRoomLookup(lookup);
+        if (existing) {
+          return { kind: "existing", session: existing };
+        }
+      }
+      const session = sessionStore.createSession({ externalRef, metadata, ttlSeconds });
+      return { kind: "new", session };
+    });
+
+    if (outcome.kind === "existing") {
+      const existing = outcome.session;
+      console.log(
+        `[session] dedup_create lookup=${lookup} sessionId=${existing.sessionId} status=${existing.status}`
+      );
+      res.status(200).json({
+        sessionId: existing.sessionId,
+        status: existing.status,
+        createdAt: existing.createdAt,
+        expiresAt: existing.expiresAt,
+        deduplicated: true
+      });
+      return;
+    }
+
+    const session = outcome.session;
+    await readModel?.upsertSession(session);
+    await eventBus.emit("session_created", { sessionId: session.sessionId, data: { metadata, externalRef } });
+    res.status(201).json({
+      sessionId: session.sessionId,
+      status: session.status,
+      createdAt: session.createdAt,
+      expiresAt: session.expiresAt
+    });
+  } catch (error) {
+    console.error(`[session] create_failed error=${error?.message || error}`);
+    res.status(500).json({ error: "session_create_failed" });
+  }
 });
 
 app.post("/v1/sessions/:sessionId/join-token", requireApiKey, (req, res) => {
@@ -145,10 +179,6 @@ app.post("/v1/sessions/:sessionId/join-token", requireApiKey, (req, res) => {
   const session = sessionStore.getSession(sessionId);
   if (!session) {
     res.status(404).json({ error: "session_not_found" });
-    return;
-  }
-  if (role === "customer" && !otpService.consumeVerified(sessionId, participantId)) {
-    res.status(403).json({ error: "otp_verification_required" });
     return;
   }
 
@@ -200,7 +230,7 @@ app.get("/v1/sessions/resolve", (req, res) => {
     res.status(400).json({ error: "roomName is required" });
     return;
   }
-  const session = sessionStore.findSessionByRoomName(roomName);
+  const session = sessionStore.findSessionByRoomLookup(roomName);
   if (!session) {
     res.status(404).json({ error: "session_not_found" });
     return;
@@ -236,7 +266,6 @@ app.post("/v1/sessions/:sessionId/customer-invite", requireApiKey, async (req, r
     res.status(404).json({ error: "session_not_found" });
     return;
   }
-  const challenge = otpService.issueChallenge(sessionId, participantId);
   const sentAt = new Date().toISOString();
   const inviteLink = `${config.customerInviteBaseUrl}?sessionId=${encodeURIComponent(sessionId)}&participantId=${encodeURIComponent(participantId)}`;
   sessionStore.addInviteLink(sessionId, inviteLink);
@@ -254,34 +283,8 @@ app.post("/v1/sessions/:sessionId/customer-invite", requireApiKey, async (req, r
     sessionId,
     participantId,
     inviteLink,
-    sentAt,
-    otp: {
-      testMode: true,
-      code: config.testOtpCode,
-      expiresAt: challenge.expiresAt
-    }
+    sentAt
   });
-});
-
-app.post("/v1/sessions/:sessionId/customer-verify-otp", async (req, res) => {
-  const { sessionId } = req.params;
-  const { participantId, otp } = req.body || {};
-  if (!participantId || !otp) {
-    res.status(400).json({ error: "participantId and otp are required" });
-    return;
-  }
-  const session = sessionStore.getSession(sessionId);
-  if (!session) {
-    res.status(404).json({ error: "session_not_found" });
-    return;
-  }
-  const result = otpService.verify(sessionId, participantId, otp);
-  if (!result.ok) {
-    res.status(400).json({ error: result.reason, attemptsLeft: result.attemptsLeft ?? null });
-    return;
-  }
-  await eventBus.emit("otp_verified", { sessionId, participantId, role: "customer", verifiedAt: result.verifiedAt });
-  res.json({ sessionId, participantId, verified: true, verifiedAt: result.verifiedAt });
 });
 
 app.post("/v1/sessions/:sessionId/leave", requireApiKey, async (req, res) => {
@@ -496,6 +499,7 @@ async function processReconnectTimeouts() {
 
       await reconnectStore.clearReconnecting(sessionId, participantId);
       mediasoupService.closeParticipant(sessionId, participantId);
+      recordingService.releaseParticipantSegmentSlot(sessionId, participantId);
       sessionStore.removeParticipant(sessionId, participantId);
       reconnectTimeoutTotal.inc();
       await eventBus.emit("participant_left", {
@@ -528,6 +532,7 @@ async function start() {
     mediasoupService,
     eventBus,
     reconnectStore,
+    recordingService,
     config
   });
 
