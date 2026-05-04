@@ -10,7 +10,8 @@
     "test": "node --test tests/*.test.js",
     "load:signaling": "k6 run load-tests/k6-signaling-rooms.js",
     "load:media-bots": "node load-tests/media-bot-runner.js",
-    "load:fake-media-ws": "node load-tests/fake-media-ws-runner.js"
+    "load:fake-media-ws": "node load-tests/fake-media-ws-runner.js",
+    "recording-merge-worker": "node scripts/recording-merge-worker.js"
   },
   "dependencies": {
     "@aws-sdk/client-lambda": "^3.914.0",
