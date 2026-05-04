@@ -31,6 +31,42 @@ class MediasoupService {
     this.producerIndex = new Map();
     this.consumerIndex = new Map();
     this.participants = new Map();
+    // sessionId -> Set<listener({sessionId, participantId, producerId, kind, producer})>
+    // Used by RecordingService to discover producers from participants who join
+    // after recording has already started.
+    this.producerListeners = new Map();
+  }
+
+  addProducerListener(sessionId, listener) {
+    if (!sessionId || typeof listener !== "function") return () => {};
+    let bucket = this.producerListeners.get(sessionId);
+    if (!bucket) {
+      bucket = new Set();
+      this.producerListeners.set(sessionId, bucket);
+    }
+    bucket.add(listener);
+    return () => this.removeProducerListener(sessionId, listener);
+  }
+
+  removeProducerListener(sessionId, listener) {
+    const bucket = this.producerListeners.get(sessionId);
+    if (!bucket) return;
+    bucket.delete(listener);
+    if (bucket.size === 0) this.producerListeners.delete(sessionId);
+  }
+
+  emitProducerAdded(payload) {
+    const bucket = this.producerListeners.get(payload.sessionId);
+    if (!bucket || bucket.size === 0) return;
+    for (const listener of bucket) {
+      try {
+        listener(payload);
+      } catch (error) {
+        console.error(
+          `[mediasoup] producer_listener_error session=${payload.sessionId} participant=${payload.participantId} producerId=${payload.producerId} error=${error?.message || error}`
+        );
+      }
+    }
   }
 
   async start() {
@@ -176,6 +212,13 @@ class MediasoupService {
       this.updateGauges();
     });
     this.updateGauges();
+    this.emitProducerAdded({
+      sessionId,
+      participantId,
+      producerId: producer.id,
+      kind: producer.kind,
+      producer
+    });
     return { producerId: producer.id };
   }
 

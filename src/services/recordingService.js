@@ -30,6 +30,27 @@ class RecordingService {
     this.historyBySession.set(sessionId, next);
   }
 
+  /**
+   * After mediasoup tears down a participant (leave or reconnect timeout), clear
+   * their late-joiner slot so the same participantId can record again if they
+   * rejoin the same session while recording is still active.
+   */
+  releaseParticipantSegmentSlot(sessionId, participantId) {
+    const recording = this.activeBySession.get(sessionId);
+    if (!recording || recording._stopping) return;
+    recording._segmentByParticipant.delete(participantId);
+    recording._segmentReleaseEpoch = (recording._segmentReleaseEpoch || 0) + 1;
+    const pending = recording._pendingByParticipant.get(participantId);
+    if (pending) {
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.timer = null;
+      recording._pendingByParticipant.delete(participantId);
+    }
+    console.log(
+      `[recording] segment_slot_released session=${sessionId} participant=${participantId} epoch=${recording._segmentReleaseEpoch}`
+    );
+  }
+
   createProcess(binary, args) {
     const proc = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stderrTail = "";
@@ -110,6 +131,210 @@ class RecordingService {
     }
   }
 
+  // Allocates a contiguous (rtp, rtcp) UDP port pair for a single tap. The
+  // counter is stored on the recording so initial segments and mid-recording
+  // joiner segments cannot collide on the same ports.
+  _allocatePortPair(recording) {
+    let port = recording._nextPort;
+    if (port % 2 !== 0) port += 1;
+    recording._nextPort = port + 2;
+    return { rtpPort: port, rtcpPort: port + 1 };
+  }
+
+  // Builds a full per-participant segment (transports + consumers + ffmpeg).
+  // Used both for participants who are already producing when recording starts,
+  // and for participants who join after the recording is already running.
+  async _buildSegment({ recording, participantId, refs, mediasoupService }) {
+    if (!refs || refs.length === 0) return null;
+    const sessionId = recording.sessionId;
+    const sortedRefs = refs
+      .slice()
+      .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "video" ? -1 : 1));
+
+    const taps = [];
+    try {
+      for (const ref of sortedRefs) {
+        const transport = await mediasoupService.createPlainTransport(sessionId, {
+          rtcpMux: false,
+          comedia: false
+        });
+        const { rtpPort, rtcpPort } = this._allocatePortPair(recording);
+        await transport.connect({
+          ip: this.config.hostIp || "127.0.0.1",
+          port: rtpPort,
+          rtcpPort
+        });
+        const room = mediasoupService.getRoom(sessionId);
+        const consumer = await transport.consume({
+          producerId: ref.producerId,
+          rtpCapabilities: room.router.rtpCapabilities,
+          paused: true
+        });
+        taps.push({
+          kind: ref.kind,
+          participantId: ref.participantId,
+          producerId: ref.producerId,
+          producer: ref.producer,
+          transport,
+          consumer,
+          rtpPort,
+          rtcpPort
+        });
+      }
+
+      const safeParticipantId = String(participantId || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
+      recording._segmentSeq = (recording._segmentSeq || 0) + 1;
+      const fileToken = `${safeParticipantId}_${recording._segmentSeq}`;
+      const segmentFile = path.join(recording._outputDir, `${recording.recordingId}_${fileToken}.webm`);
+      const sdpFile = path.join(recording._outputDir, `${recording.recordingId}_${fileToken}.sdp`);
+      const sdp = this.buildSdp(taps);
+      await fsp.writeFile(sdpFile, sdp, "utf8");
+      const processArgs = this.buildSegmentFfmpegArgs(taps, sdpFile, segmentFile);
+      const processBinary = this.config.ffmpegPath || "ffmpeg";
+      const { proc: ffmpeg, getStderrTail } = this.createProcess(processBinary, processArgs);
+      const joinedOffsetMs = Math.max(Date.now() - new Date(recording.startedAt).getTime(), 0);
+      const segment = {
+        participantId,
+        outputFile: segmentFile,
+        sdpFile,
+        taps,
+        ffmpeg,
+        getStderrTail,
+        // Offset (ms) from recording start to when this participant first
+        // started producing. Lets the downstream merge align late joiners on
+        // the timeline instead of compressing them to t=0.
+        joinedOffsetMs
+      };
+      ffmpeg.on("exit", (code) => {
+        if (!recording._stopping && code !== 0 && code !== null) {
+          console.error(
+            `recording_ffmpeg_exit_nonzero session=${sessionId} participant=${participantId} code=${code} detail=${getStderrTail()}`
+          );
+        }
+      });
+      this._scheduleSegmentWarmup(segment);
+      return segment;
+    } catch (error) {
+      for (const tap of taps) {
+        try { tap.consumer.close(); } catch (_e) {}
+        try { tap.transport.close(); } catch (_e) {}
+      }
+      throw error;
+    }
+  }
+
+  _scheduleSegmentWarmup(segment) {
+    const warmupMs = Math.max(Number.parseInt(String(this.config.keyframeWarmupMs || 1500), 10) || 1500, 0);
+    setTimeout(async () => {
+      for (const tap of segment.taps) {
+        try {
+          await tap.consumer.resume();
+        } catch (_err) {}
+        if (tap.kind === "video" && tap.consumer && typeof tap.consumer.requestKeyFrame === "function") {
+          try { await tap.consumer.requestKeyFrame(); } catch (_e) {}
+        }
+      }
+    }, warmupMs);
+  }
+
+  // Called from the producer-added listener registered with MediasoupService.
+  // Defers the actual segment build by `keyframeWarmupMs` so that participants
+  // who arrive with audio first and video shortly after are still captured in
+  // a single segment (one ffmpeg per participant).
+  _onLateProducer(recording, mediasoupService, payload) {
+    const { participantId, kind } = payload;
+    if (kind !== "audio" && kind !== "video") return;
+    if (recording._segmentByParticipant.has(participantId)) return;
+
+    let pending = recording._pendingByParticipant.get(participantId);
+    if (!pending) {
+      pending = {
+        participantId,
+        timer: null,
+        promise: null
+      };
+      recording._pendingByParticipant.set(participantId, pending);
+    }
+    if (pending.promise) return;
+    if (pending.timer) clearTimeout(pending.timer);
+
+    const debounceMs = Math.max(
+      Number.parseInt(String(this.config.lateJoinerDebounceMs || 1500), 10) || 1500,
+      100
+    );
+    pending.timer = setTimeout(() => {
+      pending.timer = null;
+      if (recording._stopping || recording._segmentByParticipant.has(participantId)) {
+        recording._pendingByParticipant.delete(participantId);
+        return;
+      }
+      pending.promise = this._materializeLateSegment(recording, mediasoupService, participantId)
+        .catch((error) => {
+          console.error(
+            `[recording] late_segment_failed session=${recording.sessionId} participant=${participantId} error=${error?.message || error}`
+          );
+        })
+        .finally(() => {
+          recording._pendingByParticipant.delete(participantId);
+        });
+    }, debounceMs);
+  }
+
+  async _materializeLateSegment(recording, mediasoupService, participantId) {
+    const epochAtStart = recording._segmentReleaseEpoch || 0;
+    const allRefs = mediasoupService.listSessionProducerRefs(recording.sessionId);
+    const refs = allRefs.filter(
+      (ref) => ref.participantId === participantId && (ref.kind === "audio" || ref.kind === "video")
+    );
+    if (refs.length === 0) return;
+    const segment = await this._buildSegment({
+      recording,
+      participantId,
+      refs,
+      mediasoupService
+    });
+    if (!segment) return;
+    if (epochAtStart !== (recording._segmentReleaseEpoch || 0)) {
+      try {
+        await this.stopFfmpeg(segment.ffmpeg);
+      } catch (_e) {}
+      for (const tap of segment.taps || []) {
+        try {
+          tap.consumer.close();
+        } catch (_e) {}
+        try {
+          tap.transport.close();
+        } catch (_e) {}
+      }
+      try {
+        if (segment.sdpFile) await fsp.unlink(segment.sdpFile);
+      } catch (_e) {}
+      console.log(
+        `[recording] late_segment_discarded_stale session=${recording.sessionId} participant=${participantId}`
+      );
+      return;
+    }
+    if (recording._stopping) {
+      // Recording stopped while we were creating; tear back down so we do not
+      // leak ffmpeg processes / udp ports.
+      try { await this.stopFfmpeg(segment.ffmpeg); } catch (_e) {}
+      for (const tap of segment.taps) {
+        try { tap.consumer.close(); } catch (_e) {}
+        try { tap.transport.close(); } catch (_e) {}
+      }
+      try { if (segment.sdpFile) await fsp.unlink(segment.sdpFile); } catch (_e) {}
+      return;
+    }
+    recording._segments.push(segment);
+    recording._segmentByParticipant.set(participantId, segment);
+    recording.tapCount = (recording.tapCount || 0) + segment.taps.length;
+    recording.audioTapCount = (recording.audioTapCount || 0) + segment.taps.filter((t) => t.kind === "audio").length;
+    recording.videoTapCount = (recording.videoTapCount || 0) + segment.taps.filter((t) => t.kind === "video").length;
+    console.log(
+      `[recording] late_segment_started session=${recording.sessionId} recordingId=${recording.recordingId} participant=${participantId} taps=${segment.taps.length} joinedOffsetMs=${segment.joinedOffsetMs}`
+    );
+  }
+
   async start(sessionId, initiatedBy, mediasoupService) {
     if (this.activeBySession.has(sessionId)) {
       return { ok: false, reason: "recording_already_active" };
@@ -130,75 +355,68 @@ class RecordingService {
     // Final mp4 lives in S3 only; keep the local placeholder path for logs.
     const outputFile = path.join(outputDir, `${recordingId}.mp4`);
     const participantIds = Array.from(new Set(mediaRefs.map((ref) => ref.participantId)));
-    const segmentRecorders = [];
-    let nextPort = this.config.basePort || 50040;
-    if (nextPort % 2 !== 0) nextPort += 1;
+
+    const recording = {
+      recordingId,
+      sessionId,
+      engine: "ffmpeg",
+      mode: RECORDING_MODE,
+      state: "recording",
+      storageUri: outputFile,
+      startedAt,
+      stoppedAt: null,
+      durationMs: null,
+      sizeBytes: null,
+      initiatedBy,
+      ffmpegStderrTail: "",
+      tapCount: 0,
+      audioTapCount: 0,
+      videoTapCount: 0,
+      _segments: [],
+      _segmentByParticipant: new Map(),
+      _pendingByParticipant: new Map(),
+      _outputDir: outputDir,
+      _nextPort: this.config.basePort || 50040,
+      _keyframeTimer: null,
+      _cpuLogTimer: null,
+      _unsubscribeProducerListener: null,
+      _stopping: false,
+      _segmentSeq: 0,
+      _segmentReleaseEpoch: 0
+    };
 
     try {
-      for (const participantId of participantIds) {
-        const refs = mediaRefs
-          .filter((ref) => ref.participantId === participantId)
-          .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "video" ? -1 : 1));
-        if (refs.length === 0) continue;
-        const taps = [];
-        for (const ref of refs) {
-          const transport = await mediasoupService.createPlainTransport(sessionId, { rtcpMux: false, comedia: false });
-          const rtpPort = nextPort;
-          nextPort += 2;
-          const rtcpPort = rtpPort + 1;
-          await transport.connect({ ip: this.config.hostIp || "127.0.0.1", port: rtpPort, rtcpPort });
-          const room = mediasoupService.getRoom(sessionId);
-          const consumer = await transport.consume({
-            producerId: ref.producerId,
-            rtpCapabilities: room.router.rtpCapabilities,
-            paused: true
-          });
-          taps.push({
-            kind: ref.kind,
-            participantId: ref.participantId,
-            producerId: ref.producerId,
-            producer: ref.producer,
-            transport,
-            consumer,
-            rtpPort,
-            rtcpPort
-          });
-        }
+      // Register before building initial segments: that loop can take a while
+      // (FFmpeg + transports). Producers that appear during it must still be
+      // eligible for late-joiner segments instead of being dropped.
+      recording._unsubscribeProducerListener = mediasoupService.addProducerListener(
+        sessionId,
+        (payload) => this._onLateProducer(recording, mediasoupService, payload)
+      );
 
-        const safeParticipantId = String(participantId || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
-        const segmentFile = path.join(outputDir, `${recordingId}_${safeParticipantId}.webm`);
-        const sdpFile = path.join(outputDir, `${recordingId}_${safeParticipantId}.sdp`);
-        const sdp = this.buildSdp(taps);
-        await fsp.writeFile(sdpFile, sdp, "utf8");
-        const processArgs = this.buildSegmentFfmpegArgs(taps, sdpFile, segmentFile);
-        const processBinary = this.config.ffmpegPath || "ffmpeg";
-        const { proc: ffmpeg, getStderrTail } = this.createProcess(processBinary, processArgs);
-        segmentRecorders.push({
+      for (const participantId of participantIds) {
+        const refs = mediaRefs.filter((ref) => ref.participantId === participantId);
+        if (refs.length === 0) continue;
+        const segment = await this._buildSegment({
+          recording,
           participantId,
-          outputFile: segmentFile,
-          sdpFile,
-          taps,
-          ffmpeg,
-          getStderrTail
+          refs,
+          mediasoupService
         });
+        if (!segment) continue;
+        recording._segments.push(segment);
+        recording._segmentByParticipant.set(participantId, segment);
+        recording.tapCount += segment.taps.length;
+        recording.audioTapCount += segment.taps.filter((t) => t.kind === "audio").length;
+        recording.videoTapCount += segment.taps.filter((t) => t.kind === "video").length;
       }
 
-      const warmupTimer = setTimeout(async () => {
-        for (const segment of segmentRecorders) {
-          for (const tap of segment.taps) {
-            try {
-              await tap.consumer.resume();
-            } catch (_err) {}
-            if (tap.kind === "video" && tap.consumer && typeof tap.consumer.requestKeyFrame === "function") {
-              try { await tap.consumer.requestKeyFrame(); } catch (_e) {}
-            }
-          }
-        }
-      }, this.config.keyframeWarmupMs || 1500);
-
+      // Periodic key-frame nudges for ALL active video taps (initial AND
+      // late-joiner segments). Iterating recording._segments instead of a
+      // local snapshot guarantees mid-recording joiners get keyframes too.
       const keyframeIntervalMs = this.config.keyframeIntervalMs || 3000;
-      const keyframeTimer = setInterval(async () => {
-        for (const segment of segmentRecorders) {
+      recording._keyframeTimer = setInterval(async () => {
+        for (const segment of recording._segments) {
           for (const tap of segment.taps) {
             if (tap.kind !== "video") continue;
             try {
@@ -208,55 +426,23 @@ class RecordingService {
               }
             } catch (_err) {}
             if (tap.producer && typeof tap.producer.requestKeyFrame === "function") {
-              try {
-                await tap.producer.requestKeyFrame();
-              } catch (_err) {}
+              try { await tap.producer.requestKeyFrame(); } catch (_err) {}
             }
           }
         }
       }, keyframeIntervalMs);
 
-      const recording = {
-        recordingId,
-        sessionId,
-        engine: "ffmpeg",
-        mode: RECORDING_MODE,
-        state: "recording",
-        storageUri: outputFile,
-        startedAt,
-        stoppedAt: null,
-        durationMs: null,
-        sizeBytes: null,
-        initiatedBy,
-        ffmpegStderrTail: "",
-        tapCount: segmentRecorders.reduce((sum, s) => sum + s.taps.length, 0),
-        audioTapCount: segmentRecorders.reduce((sum, s) => sum + s.taps.filter((t) => t.kind === "audio").length, 0),
-        videoTapCount: segmentRecorders.reduce((sum, s) => sum + s.taps.filter((t) => t.kind === "video").length, 0),
-        _segments: segmentRecorders,
-        _keyframeTimer: keyframeTimer,
-        _warmupTimer: warmupTimer,
-        _cpuLogTimer: null,
-        _stopping: false
-      };
       if (this.config.cpuLogs !== false && pidusage) {
         const cpuIntervalMs = Math.max(Number.parseInt(String(this.config.cpuLogIntervalMs || 10000), 10) || 10000, 1000);
         recording._cpuLogTimer = setInterval(() => {
           void this.logProcessCpuUsage(recording);
         }, cpuIntervalMs);
       }
-      for (const segment of segmentRecorders) {
-        segment.ffmpeg.on("exit", (code) => {
-          if (!recording._stopping && code !== 0 && code !== null) {
-            console.error(
-              `recording_ffmpeg_exit_nonzero session=${sessionId} participant=${segment.participantId} code=${code} detail=${segment.getStderrTail()}`
-            );
-          }
-        });
-      }
+
       this.activeBySession.set(sessionId, recording);
       return { ok: true, recording: this.toPublic(recording) };
     } catch (error) {
-      for (const segment of segmentRecorders) {
+      for (const segment of recording._segments) {
         try { await this.stopFfmpeg(segment.ffmpeg); } catch (_e) {}
         for (const tap of segment.taps || []) {
           try { tap.consumer.close(); } catch (_e) {}
@@ -265,6 +451,11 @@ class RecordingService {
         try {
           if (segment.sdpFile) await fsp.unlink(segment.sdpFile);
         } catch (_e) {}
+      }
+      if (recording._keyframeTimer) clearInterval(recording._keyframeTimer);
+      if (recording._cpuLogTimer) clearInterval(recording._cpuLogTimer);
+      if (typeof recording._unsubscribeProducerListener === "function") {
+        recording._unsubscribeProducerListener();
       }
       return { ok: false, reason: "recording_start_failed", detail: error.message };
     }
@@ -280,8 +471,26 @@ class RecordingService {
 
     active._stopping = true;
 
+    if (typeof active._unsubscribeProducerListener === "function") {
+      active._unsubscribeProducerListener();
+      active._unsubscribeProducerListener = null;
+    }
+    // Cancel pending late-joiner debounces and wait for any in-flight segment
+    // builds to settle so we never leak ffmpeg / transports past stop().
+    const pendingPromises = [];
+    for (const pending of active._pendingByParticipant.values()) {
+      if (pending.timer) {
+        clearTimeout(pending.timer);
+        pending.timer = null;
+      }
+      if (pending.promise) pendingPromises.push(pending.promise);
+    }
+    active._pendingByParticipant.clear();
+    if (pendingPromises.length > 0) {
+      await Promise.allSettled(pendingPromises);
+    }
+
     if (active._keyframeTimer) clearInterval(active._keyframeTimer);
-    if (active._warmupTimer) clearTimeout(active._warmupTimer);
     if (active._cpuLogTimer) clearInterval(active._cpuLogTimer);
     if (pidusage) {
       try { pidusage.clear(); } catch (_e) {}
@@ -310,6 +519,7 @@ class RecordingService {
         outputFile: segment.outputFile,
         hasVideo: (segment.taps || []).some((tap) => tap.kind === "video"),
         hasAudio: (segment.taps || []).some((tap) => tap.kind === "audio"),
+        joinedOffsetMs: Number.isFinite(segment.joinedOffsetMs) ? segment.joinedOffsetMs : 0,
         stderrTail: segment.getStderrTail ? segment.getStderrTail() : ""
       });
     }
@@ -333,9 +543,13 @@ class RecordingService {
       mergeStderrTail: ""
     };
     delete processing._segments;
+    delete processing._segmentByParticipant;
+    delete processing._pendingByParticipant;
     delete processing._keyframeTimer;
-    delete processing._warmupTimer;
     delete processing._cpuLogTimer;
+    delete processing._unsubscribeProducerListener;
+    delete processing._outputDir;
+    delete processing._nextPort;
 
     this.activeBySession.delete(sessionId);
     this.upsertHistory(sessionId, processing);
