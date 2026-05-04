@@ -99,6 +99,108 @@ async function probeDurationMs(localPath, ffprobePath, fallbackMs) {
   return Math.max(0, Math.round(Number(fallbackMs) || 0));
 }
 
+async function probeHasStream(localPath, ffprobePath, streamLetter) {
+  try {
+    const { stdout } = await runProcessCapture(ffprobePath, [
+      "-v",
+      "error",
+      "-select_streams",
+      streamLetter,
+      "-show_entries",
+      "stream=index",
+      "-of",
+      "csv=p=0",
+      localPath
+    ]);
+    return stdout
+      .trim()
+      .split("\n")
+      .some((line) => line.length > 0);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * concat=n=v:a= requires every input to expose both [i:v] and [i:a]. Interval
+ * clips occasionally end up video-only or audio-only (e.g. muted / camera-off
+ * edge cases), which yields code=234 "matches no streams".
+ */
+async function normalizeIntervalClipForConcat(ffmpegPath, ffprobePath, clipPath, outPath, audioBitrate) {
+  const hasV = await probeHasStream(clipPath, ffprobePath, "v");
+  const hasA = await probeHasStream(clipPath, ffprobePath, "a");
+  if (hasV && hasA) {
+    await fsp.copyFile(clipPath, outPath);
+    return;
+  }
+  const durSec = Math.max((await probeDurationMs(clipPath, ffprobePath, 10_000)) / 1000, 0.05);
+  console.warn(
+    `[lambda] concat_pad_streams clip=${path.basename(clipPath)} hasV=${hasV} hasA=${hasA} durSec=${durSec.toFixed(3)}`
+  );
+  if (hasV && !hasA) {
+    await runProcess(ffmpegPath, [
+      "-y",
+      "-loglevel",
+      "warning",
+      "-i",
+      clipPath,
+      "-f",
+      "lavfi",
+      "-i",
+      "anullsrc=channel_layout=stereo:sample_rate=48000",
+      "-map",
+      "0:v:0",
+      "-map",
+      "1:a:0",
+      "-c:v",
+      "copy",
+      "-c:a",
+      "aac",
+      "-b:a",
+      audioBitrate,
+      "-shortest",
+      "-movflags",
+      "+faststart",
+      outPath
+    ]);
+    return;
+  }
+  if (!hasV && hasA) {
+    await runProcess(ffmpegPath, [
+      "-y",
+      "-loglevel",
+      "warning",
+      "-f",
+      "lavfi",
+      "-i",
+      `color=c=black:s=1280x720:r=24`,
+      "-i",
+      clipPath,
+      "-map",
+      "0:v:0",
+      "-map",
+      "1:a:0",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-crf",
+      "23",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "copy",
+      "-t",
+      String(durSec.toFixed(4)),
+      "-movflags",
+      "+faststart",
+      outPath
+    ]);
+    return;
+  }
+  throw new Error(`concat_normalize_no_usable_streams path=${clipPath}`);
+}
+
 // IMPORTANT: WebM streams from the browser MediaRecorder / mediasoup pipeline
 // are VFR and contain many runs of frames with identical PTS (the 1ms
 // container tick can't fit bursty packet output). The previous chain used
@@ -317,24 +419,31 @@ async function renderIntervalClip({
   return outPath;
 }
 
-async function concatMp4Clips(ffmpegPath, clipPaths, outputFile, timeoutMs) {
+async function concatMp4Clips(ffmpegPath, ffprobePath, clipPaths, outputFile, timeoutMs) {
   if (clipPaths.length === 0) throw new Error("no_clips_to_concat");
-  if (clipPaths.length === 1) {
-    await fsp.copyFile(clipPaths[0], outputFile);
+  const audioBitrate = String(process.env.MP4_AUDIO_BITRATE || "128k");
+  const tmpDir = path.dirname(clipPaths[0]);
+  const normalized = [];
+  for (let i = 0; i < clipPaths.length; i += 1) {
+    const normPath = path.join(tmpDir, `concat-norm-${i}.mp4`);
+    await normalizeIntervalClipForConcat(ffmpegPath, ffprobePath, clipPaths[i], normPath, audioBitrate);
+    normalized.push(normPath);
+  }
+  if (normalized.length === 1) {
+    await fsp.copyFile(normalized[0], outputFile);
     return;
   }
   const preset = String(process.env.MP4_PRESET || "ultrafast");
   const crf = String(process.env.MP4_CRF || "23");
-  const audioBitrate = String(process.env.MP4_AUDIO_BITRATE || "128k");
   const args = ["-loglevel", "warning", "-y"];
-  for (const c of clipPaths) {
+  for (const c of normalized) {
     args.push("-i", c);
   }
   const pairs = [];
-  for (let i = 0; i < clipPaths.length; i += 1) {
+  for (let i = 0; i < normalized.length; i += 1) {
     pairs.push(`[${i}:v][${i}:a]`);
   }
-  const fc = `${pairs.join("")}concat=n=${clipPaths.length}:v=1:a=1[v][a]`;
+  const fc = `${pairs.join("")}concat=n=${normalized.length}:v=1:a=1[v][a]`;
   args.push("-filter_complex", fc);
   args.push(
     "-map",
@@ -422,7 +531,7 @@ async function runDynamicTimelineMerge({ participantInputs, manifest, tmpRoot, f
     throw new Error("dynamic_merge_no_clips");
   }
 
-  await concatMp4Clips(ffmpegPath, clipPaths, finalOutput, 14 * 60 * 1000);
+  await concatMp4Clips(ffmpegPath, ffprobePath, clipPaths, finalOutput, 14 * 60 * 1000);
   console.log(
     `[lambda] dynamic_merge_done clips=${clipPaths.length} timelineEndMs=${timelineEndMs} boundaries=${boundaries.length}`
   );
