@@ -321,25 +321,30 @@ function setupWebSocketServer({
 
         if (msg.event === "leave") {
           if (ws.sessionId && ws.participantId) {
+            const stillInSession = (sessionStore.listParticipants(ws.sessionId) || []).some(
+              (p) => p.participantId === ws.participantId
+            );
             removeSocketFromSession(ws.sessionId, ws);
             await reconnectStore.clearReconnecting(ws.sessionId, ws.participantId);
-            mediasoupService.closeParticipant(ws.sessionId, ws.participantId);
-            if (recordingService?.releaseParticipantSegmentSlot) {
-              await recordingService.releaseParticipantSegmentSlot(ws.sessionId, ws.participantId);
+            if (stillInSession) {
+              mediasoupService.closeParticipant(ws.sessionId, ws.participantId);
+              if (recordingService?.releaseParticipantSegmentSlot) {
+                await recordingService.releaseParticipantSegmentSlot(ws.sessionId, ws.participantId);
+              }
+              sessionStore.removeParticipant(ws.sessionId, ws.participantId);
+              await eventBus.emit("participant_left", {
+                sessionId: ws.sessionId,
+                participantId: ws.participantId,
+                role: ws.role,
+                reason: "explicit_leave"
+              });
+              broadcastToSession(ws.sessionId, "participantPresence", {
+                sessionId: ws.sessionId,
+                participantId: ws.participantId,
+                role: ws.role,
+                state: "left"
+              });
             }
-            sessionStore.removeParticipant(ws.sessionId, ws.participantId);
-            await eventBus.emit("participant_left", {
-              sessionId: ws.sessionId,
-              participantId: ws.participantId,
-              role: ws.role,
-              reason: "explicit_leave"
-            });
-            broadcastToSession(ws.sessionId, "participantPresence", {
-              sessionId: ws.sessionId,
-              participantId: ws.participantId,
-              role: ws.role,
-              state: "left"
-            });
           }
           send(ws, "left", {}, requestId);
           return;

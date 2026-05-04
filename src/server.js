@@ -289,6 +289,15 @@ app.post("/v1/sessions/:sessionId/customer-invite", requireApiKey, async (req, r
 
 app.post("/v1/sessions/:sessionId/leave", requireApiKey, async (req, res) => {
   const { sessionId } = req.params;
+  const active = sessionStore.listParticipants(sessionId) || [];
+  if (active.length > 1) {
+    res.status(409).json({
+      error: "session_has_active_participants",
+      participantCount: active.length,
+      hint: "Use POST /v1/sessions/{sessionId}/participants/{participantId}/leave for a single attendee."
+    });
+    return;
+  }
   const session = sessionStore.leaveSession(sessionId);
   if (!session) {
     res.status(404).json({ error: "session_not_found" });

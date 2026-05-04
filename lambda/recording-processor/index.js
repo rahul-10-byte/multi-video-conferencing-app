@@ -296,7 +296,7 @@ function collectTimelineBoundaries(participants, timelineEndMs) {
   raw.add(Math.max(1, Math.round(timelineEndMs)));
   for (const p of participants) {
     raw.add(Math.round(p.joinedOffsetMs));
-    raw.add(Math.round(p.joinedOffsetMs + p.durationMs));
+    raw.add(Math.round(p.joinedOffsetMs + p.timelineDurationMs));
   }
   const sorted = Array.from(raw).sort((a, b) => a - b);
   const deduped = [];
@@ -309,7 +309,9 @@ function collectTimelineBoundaries(participants, timelineEndMs) {
 }
 
 function activeParticipantsInInterval(participants, t0, t1) {
-  return participants.filter((p) => p.joinedOffsetMs < t1 && p.joinedOffsetMs + p.durationMs > t0);
+  return participants.filter(
+    (p) => p.joinedOffsetMs < t1 && p.joinedOffsetMs + p.timelineDurationMs > t0
+  );
 }
 
 async function renderIntervalClip({
@@ -347,7 +349,8 @@ async function renderIntervalClip({
     const p = capped[i];
     const join = p.joinedOffsetMs;
     const startSec = Math.max(0, (intervalStartMs - join) / 1000);
-    const endSec = Math.min(p.durationMs / 1000, (intervalEndMs - join) / 1000);
+    const mediaCapSec = (p.mediaDurationMs != null ? p.mediaDurationMs : p.timelineDurationMs) / 1000;
+    const endSec = Math.min(mediaCapSec, (intervalEndMs - join) / 1000);
     if (endSec <= startSec + 0.02) {
       console.warn(`[lambda] skip_interval_clip empty_trim participant=${p.participantId} t0=${intervalStartMs} t1=${intervalEndMs}`);
       return null;
@@ -486,14 +489,24 @@ async function runDynamicTimelineMerge({ participantInputs, manifest, tmpRoot, f
   const recordingDurationMs = Number.isFinite(Number(manifest.durationMs)) ? Number(manifest.durationMs) : 0;
 
   for (const p of participantInputs) {
-    const fallback = Math.max(0, recordingDurationMs - p.joinedOffsetMs);
-    p.durationMs = await probeDurationMs(p.localPath, ffprobePath, fallback);
-    if (p.durationMs < 200 && recordingDurationMs > p.joinedOffsetMs + 200) {
-      p.durationMs = Math.max(p.durationMs, recordingDurationMs - p.joinedOffsetMs);
+    const fromManifest = Number.isFinite(Number(p.sourceDurationMs)) ? Number(p.sourceDurationMs) : null;
+    const naiveFallback = Math.max(0, recordingDurationMs - p.joinedOffsetMs);
+    let probed = await probeDurationMs(p.localPath, ffprobePath, 0);
+    if (!Number.isFinite(probed) || probed < 50) {
+      probed = fromManifest != null ? fromManifest : naiveFallback;
+    }
+    p.mediaDurationMs = probed;
+    if (fromManifest != null && fromManifest >= 0) {
+      p.timelineDurationMs = fromManifest;
+    } else {
+      p.timelineDurationMs = probed;
+      if (p.timelineDurationMs < 200 && recordingDurationMs > p.joinedOffsetMs + 200) {
+        p.timelineDurationMs = Math.max(p.timelineDurationMs, naiveFallback);
+      }
     }
   }
 
-  const ends = participantInputs.map((p) => p.joinedOffsetMs + p.durationMs);
+  const ends = participantInputs.map((p) => p.joinedOffsetMs + p.timelineDurationMs);
   const timelineEndMs = Math.max(recordingDurationMs || 0, ...ends, 500);
 
   const boundaries = collectTimelineBoundaries(participantInputs, timelineEndMs);
@@ -598,15 +611,20 @@ async function buildParticipantInputsForMerge(bucket, segments, tmpRoot) {
     await downloadToFile(bucket, seg.key, localFile);
     const stat = await fsp.stat(localFile);
     const joinedOffsetMs = Number.isFinite(Number(seg.joinedOffsetMs)) ? Number(seg.joinedOffsetMs) : 0;
+    const sourceDurationMs = Number.isFinite(Number(seg.sourceDurationMs)) ? Number(seg.sourceDurationMs) : null;
     console.log(
-      `[lambda] segment_downloaded layout=dynamic_row participant=${participantId} idx=${i} sizeBytes=${stat.size} joinedOffsetMs=${joinedOffsetMs}`
+      `[lambda] segment_downloaded layout=dynamic_row participant=${participantId} idx=${i} sizeBytes=${stat.size} joinedOffsetMs=${joinedOffsetMs} sourceDurationMs=${sourceDurationMs ?? "n/a"}`
     );
-    participantInputs.push({
+    const row = {
       participantId,
       localPath: localFile,
       joinedOffsetMs,
       manifestKey: seg.key
-    });
+    };
+    if (sourceDurationMs != null) {
+      row.sourceDurationMs = sourceDurationMs;
+    }
+    participantInputs.push(row);
   }
   return participantInputs;
 }

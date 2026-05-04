@@ -122,8 +122,7 @@ test("rejects replayed join token over websocket", async (t) => {
   t.after(() => ws1.close());
   await nextMessage(ws1); // connected
   ws1.send(JSON.stringify({ event: "join", data: { token } }));
-  const joined = await nextMessage(ws1);
-  assert.equal(joined.event, "joined");
+  await waitForEvent(ws1, "joined");
 
   ws1.send(JSON.stringify({ event: "join", data: { token } }));
   const replay = await nextMessage(ws1);
@@ -149,8 +148,7 @@ test("removes participant after reconnect timeout", async (t) => {
   const ws = await connectWs(wsUrl);
   await nextMessage(ws); // connected
   ws.send(JSON.stringify({ event: "join", data: { token } }));
-  const joined = await nextMessage(ws);
-  assert.equal(joined.event, "joined");
+  await waitForEvent(ws, "joined");
 
   ws.close();
   await delay(2600); // grace + poll + processing
@@ -400,7 +398,7 @@ test("emits chatMessage event when participant sends chat", async (t) => {
   t.after(() => wsAgent.close());
   await nextMessage(wsAgent);
   wsAgent.send(JSON.stringify({ event: "join", data: { token: agentToken } }));
-  assert.equal((await nextMessage(wsAgent)).event, "joined");
+  await waitForEvent(wsAgent, "joined");
 
   wsAgent.send(JSON.stringify({ event: "chatSend", data: { text: "hello customer" }, requestId: "chat_req_1" }));
   const chatEventAgent = await waitForEvent(wsAgent, "chatMessage");

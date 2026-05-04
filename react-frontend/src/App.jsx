@@ -932,6 +932,7 @@ export default function App() {
   const reconnectingRef = useRef(false);
   const intentionalLeaveRef = useRef(false);
   const connectionMetaRef = useRef(null);
+  const lastJoinedParticipantIdRef = useRef(null);
   const localStreamRef = useRef(null);
   const lastVideoOutboundRef = useRef({ bytesSent: null, timestampMs: null });
 
@@ -1154,6 +1155,7 @@ export default function App() {
     setRecordingStartedAt(null);
     setRecordingActive(false);
     intentionalLeaveRef.current = false;
+    lastJoinedParticipantIdRef.current = null;
     reconnectingRef.current = false;
     reconnectAttemptRef.current = 0;
     clearReconnectTimer();
@@ -1476,6 +1478,7 @@ export default function App() {
       rtpCapabilities: null,
     });
 
+    lastJoinedParticipantIdRef.current = joinedParticipantId;
     setSessionInfo({
       sessionId,
       roomName: joinedRoomName,
@@ -1857,11 +1860,29 @@ export default function App() {
 
   async function leaveMeeting() {
     const sessionId = sessionInfo?.sessionId;
-    const currentParticipantId = sessionInfo?.participantId || activeParticipantId;
+    const currentParticipantId =
+      lastJoinedParticipantIdRef.current ||
+      connectionMetaRef.current?.participantId ||
+      sessionInfo?.participantId ||
+      activeParticipantId;
 
     try {
       intentionalLeaveRef.current = true;
       clearReconnectTimer();
+      if (sessionId && currentParticipantId) {
+        try {
+          await requestJson(
+            backendUrl,
+            `/v1/sessions/${sessionId}/participants/${encodeURIComponent(currentParticipantId)}/leave`,
+            {
+              method: 'POST',
+              apiKey,
+            },
+          );
+        } catch (_error) {
+          // May already be removed (e.g. duplicate cleanup); never fall back to session-wide leave here.
+        }
+      }
       if (socketRef.current) {
         try {
           await socketRef.current.request('leave', {});
@@ -1872,23 +1893,11 @@ export default function App() {
         socketRef.current = null;
       }
 
-      if (sessionId) {
-        if (currentParticipantId) {
-          await requestJson(
-            backendUrl,
-            `/v1/sessions/${sessionId}/participants/${encodeURIComponent(currentParticipantId)}/leave`,
-            {
-              method: 'POST',
-              apiKey,
-            },
-          );
-        } else {
-          // Fallback for legacy links without participant context.
-          await requestJson(backendUrl, `/v1/sessions/${sessionId}/leave`, {
-            method: 'POST',
-            apiKey,
-          });
-        }
+      if (sessionId && !currentParticipantId) {
+        await requestJson(backendUrl, `/v1/sessions/${sessionId}/leave`, {
+          method: 'POST',
+          apiKey,
+        });
       }
     } finally {
       setMessages(initialMessages);

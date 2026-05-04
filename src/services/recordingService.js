@@ -46,6 +46,10 @@ class RecordingService {
       try {
         await this.stopFfmpeg(activeSegment.ffmpeg);
       } catch (_e) {}
+      const sw = activeSegment.segmentWallClockStartMs;
+      if (Number.isFinite(sw)) {
+        activeSegment.sourceDurationMs = Math.max(0, Date.now() - sw);
+      }
       for (const tap of activeSegment.taps || []) {
         try { tap.consumer.close(); } catch (_e) {}
         try { tap.transport.close(); } catch (_e) {}
@@ -210,6 +214,7 @@ class RecordingService {
       const processBinary = this.config.ffmpegPath || "ffmpeg";
       const { proc: ffmpeg, getStderrTail } = this.createProcess(processBinary, processArgs);
       const joinedOffsetMs = Math.max(Date.now() - new Date(recording.startedAt).getTime(), 0);
+      const segmentWallClockStartMs = Date.now();
       const segment = {
         participantId,
         outputFile: segmentFile,
@@ -220,7 +225,9 @@ class RecordingService {
         // Offset (ms) from recording start to when this participant first
         // started producing. Lets the downstream merge align late joiners on
         // the timeline instead of compressing them to t=0.
-        joinedOffsetMs
+        joinedOffsetMs,
+        // Wall clock when this segment's ffmpeg started (for manifest sourceDurationMs).
+        segmentWallClockStartMs
       };
       ffmpeg.on("exit", (code) => {
         if (!recording._stopping && code !== 0 && code !== null) {
@@ -529,14 +536,22 @@ class RecordingService {
       } catch (_e) {}
     }
 
+    const stoppedAtMs = new Date(stoppedAt).getTime();
     const segmentDetails = [];
     for (const segment of segments) {
+      let sourceDurationMs = segment.sourceDurationMs;
+      if (!Number.isFinite(sourceDurationMs)) {
+        const sw = segment.segmentWallClockStartMs;
+        const startMs = Number.isFinite(sw) ? sw : new Date(active.startedAt).getTime();
+        sourceDurationMs = Math.max(0, stoppedAtMs - startMs);
+      }
       segmentDetails.push({
         participantId: segment.participantId,
         outputFile: segment.outputFile,
         hasVideo: (segment.taps || []).some((tap) => tap.kind === "video"),
         hasAudio: (segment.taps || []).some((tap) => tap.kind === "audio"),
         joinedOffsetMs: Number.isFinite(segment.joinedOffsetMs) ? segment.joinedOffsetMs : 0,
+        sourceDurationMs,
         stderrTail: segment.getStderrTail ? segment.getStderrTail() : ""
       });
     }

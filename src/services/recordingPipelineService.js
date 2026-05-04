@@ -93,14 +93,18 @@ class RecordingPipelineService {
         filename: localPath
       });
       const sizeBytes = await this.uploadFile(localPath, key);
-      uploadedSegments.push({
+      const row = {
         participantId: segment.participantId,
         key,
         sizeBytes,
         hasVideo: Boolean(segment.hasVideo),
         hasAudio: Boolean(segment.hasAudio),
         joinedOffsetMs: Number.isFinite(segment.joinedOffsetMs) ? segment.joinedOffsetMs : 0
-      });
+      };
+      if (Number.isFinite(segment.sourceDurationMs)) {
+        row.sourceDurationMs = segment.sourceDurationMs;
+      }
+      uploadedSegments.push(row);
       totalSize += sizeBytes;
     }
 
