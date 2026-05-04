@@ -499,7 +499,7 @@ async function processReconnectTimeouts() {
 
       await reconnectStore.clearReconnecting(sessionId, participantId);
       mediasoupService.closeParticipant(sessionId, participantId);
-      recordingService.releaseParticipantSegmentSlot(sessionId, participantId);
+      await recordingService.releaseParticipantSegmentSlot(sessionId, participantId);
       sessionStore.removeParticipant(sessionId, participantId);
       reconnectTimeoutTotal.inc();
       await eventBus.emit("participant_left", {

@@ -324,7 +324,9 @@ function setupWebSocketServer({
             removeSocketFromSession(ws.sessionId, ws);
             await reconnectStore.clearReconnecting(ws.sessionId, ws.participantId);
             mediasoupService.closeParticipant(ws.sessionId, ws.participantId);
-            recordingService?.releaseParticipantSegmentSlot?.(ws.sessionId, ws.participantId);
+            if (recordingService?.releaseParticipantSegmentSlot) {
+              await recordingService.releaseParticipantSegmentSlot(ws.sessionId, ws.participantId);
+            }
             sessionStore.removeParticipant(ws.sessionId, ws.participantId);
             await eventBus.emit("participant_left", {
               sessionId: ws.sessionId,
