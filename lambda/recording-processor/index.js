@@ -131,7 +131,7 @@ async function normalizeIntervalClipForConcat(ffmpegPath, ffprobePath, clipPath,
   const hasA = await probeHasStream(clipPath, ffprobePath, "a");
   if (hasV && hasA) {
     await fsp.copyFile(clipPath, outPath);
-    return;
+    return true;
   }
   const durSec = Math.max((await probeDurationMs(clipPath, ffprobePath, 10_000)) / 1000, 0.05);
   console.warn(
@@ -163,7 +163,7 @@ async function normalizeIntervalClipForConcat(ffmpegPath, ffprobePath, clipPath,
       "+faststart",
       outPath
     ]);
-    return;
+    return true;
   }
   if (!hasV && hasA) {
     await runProcess(ffmpegPath, [
@@ -196,9 +196,12 @@ async function normalizeIntervalClipForConcat(ffmpegPath, ffprobePath, clipPath,
       "+faststart",
       outPath
     ]);
-    return;
+    return true;
   }
-  throw new Error(`concat_normalize_no_usable_streams path=${clipPath}`);
+  // Rarely ffmpeg may emit an empty container for a micro-interval. Skip this
+  // clip instead of failing the whole recording.
+  console.warn(`[lambda] skip_concat_unusable_clip path=${clipPath}`);
+  return false;
 }
 
 // IMPORTANT: WebM streams from the browser MediaRecorder / mediasoup pipeline
@@ -426,8 +429,17 @@ async function concatMp4Clips(ffmpegPath, ffprobePath, clipPaths, outputFile, ti
   const normalized = [];
   for (let i = 0; i < clipPaths.length; i += 1) {
     const normPath = path.join(tmpDir, `concat-norm-${i}.mp4`);
-    await normalizeIntervalClipForConcat(ffmpegPath, ffprobePath, clipPaths[i], normPath, audioBitrate);
-    normalized.push(normPath);
+    const usable = await normalizeIntervalClipForConcat(
+      ffmpegPath,
+      ffprobePath,
+      clipPaths[i],
+      normPath,
+      audioBitrate
+    );
+    if (usable) normalized.push(normPath);
+  }
+  if (normalized.length === 0) {
+    throw new Error("all_concat_clips_unusable");
   }
   if (normalized.length === 1) {
     await fsp.copyFile(normalized[0], outputFile);
