@@ -98,7 +98,8 @@ class RecordingPipelineService {
         key,
         sizeBytes,
         hasVideo: Boolean(segment.hasVideo),
-        hasAudio: Boolean(segment.hasAudio)
+        hasAudio: Boolean(segment.hasAudio),
+        joinedOffsetMs: Number.isFinite(segment.joinedOffsetMs) ? segment.joinedOffsetMs : 0
       });
       totalSize += sizeBytes;
     }
