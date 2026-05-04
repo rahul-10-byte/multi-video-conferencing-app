@@ -232,10 +232,11 @@ paths:
       tags: [sessions]
       summary: End a session
       description: |
-        Ends the session when at most one participant remains in the store.
-        If multiple participants are still present, returns **409**; remove each
-        attendee with `POST /v1/sessions/{sessionId}/participants/{participantId}/leave`
-        instead so recording and the call can continue for others.
+        Ends the session only when **no** participants remain (room already empty).
+        If anyone is still in the session, returns **409** — including the case
+        where one person just left and the store still lists the remaining host
+        (a mistaken `POST .../leave` would otherwise end the call for them).
+        Remove each person with `POST /v1/sessions/{sessionId}/participants/{participantId}/leave` first.
       parameters:
         - $ref: "#/components/parameters/SessionId"
       responses:

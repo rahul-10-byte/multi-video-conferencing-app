@@ -504,6 +504,22 @@ async function runDynamicTimelineMerge({ participantInputs, manifest, tmpRoot, f
         p.timelineDurationMs = Math.max(p.timelineDurationMs, naiveFallback);
       }
     }
+
+    // Wall-clock manifest duration can exceed what ffprobe sees in a WebM that was
+    // cut on SIGINT (or RTP gaps). If timeline > real media, we still allocate
+    // 2-up intervals; hstack ends when the short input ends, then -t pads the MP4
+    // to the full interval → several seconds of frozen side-by-side. Cap the
+    // on-screen window to actual mux duration (+ small slack).
+    const slackMs = Math.max(0, Math.round(Number(process.env.VC_TIMELINE_MEDIA_SLACK_MS || "400")));
+    if (Number.isFinite(p.mediaDurationMs) && p.mediaDurationMs > 0) {
+      const before = p.timelineDurationMs;
+      p.timelineDurationMs = Math.min(p.timelineDurationMs, p.mediaDurationMs + slackMs);
+      if (before - p.timelineDurationMs > 500) {
+        console.warn(
+          `[lambda] timeline_capped_to_media participant=${p.participantId} beforeMs=${before} mediaMs=${p.mediaDurationMs} afterMs=${p.timelineDurationMs}`
+        );
+      }
+    }
   }
 
   const ends = participantInputs.map((p) => p.joinedOffsetMs + p.timelineDurationMs);

@@ -38,6 +38,7 @@ The Lambda always emits MP4. WebM is not produced as a final output.
 Optional merge / encoder tuning:
 
 - `VC_MERGE_LAYOUT` — `dynamic` (default) or `static` (legacy single-pass merge).
+- `VC_TIMELINE_MEDIA_SLACK_MS` (default `400`) — when dynamic merge caps each participant’s on-screen window to **ffprobe duration + slack** so wall-clock `sourceDurationMs` cannot exceed real mux length (avoids frozen split-screen padding after someone leaves).
 - `FINAL_OUTPUT_PREFIX_SUFFIX` (default `final` — produces `final.mp4`)
 - `MP4_PRESET` (default `ultrafast`)
 - `MP4_CRF` (default `23`)

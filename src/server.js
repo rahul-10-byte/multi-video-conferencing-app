@@ -290,11 +290,15 @@ app.post("/v1/sessions/:sessionId/customer-invite", requireApiKey, async (req, r
 app.post("/v1/sessions/:sessionId/leave", requireApiKey, async (req, res) => {
   const { sessionId } = req.params;
   const active = sessionStore.listParticipants(sessionId) || [];
-  if (active.length > 1) {
+  // Reject if *anyone* is still in the session. After one browser calls
+  // participant leave / WS leave, the leaver is already removed — a mistaken
+  // follow-up POST .../leave would otherwise see count===1 (the remaining
+  // host) and end the whole session for them.
+  if (active.length > 0) {
     res.status(409).json({
       error: "session_has_active_participants",
       participantCount: active.length,
-      hint: "Use POST /v1/sessions/{sessionId}/participants/{participantId}/leave for a single attendee."
+      hint: "Remove each attendee with POST /v1/sessions/{sessionId}/participants/{participantId}/leave first; call this only when the room is empty."
     });
     return;
   }
