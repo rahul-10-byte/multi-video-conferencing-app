@@ -182,10 +182,14 @@ app.post("/v1/sessions/:sessionId/join-token", requireApiKey, (req, res) => {
     return;
   }
 
-  const issued = tokenService.issueJoinToken({ sessionId, participantId, role, ttlSeconds });
+  const existingParticipant = (sessionStore.listParticipants(sessionId) || []).find(
+    (participant) => participant.participantId === participantId
+  );
+  const effectiveRole = existingParticipant?.role || role;
+  const issued = tokenService.issueJoinToken({ sessionId, participantId, role: effectiveRole, ttlSeconds });
   sessionStore.upsertParticipant(sessionId, {
     participantId,
-    role,
+    role: effectiveRole,
     displayName,
     state: "token_issued",
     joinedAt: new Date().toISOString()
@@ -267,7 +271,12 @@ app.post("/v1/sessions/:sessionId/customer-invite", requireApiKey, async (req, r
     return;
   }
   const sentAt = new Date().toISOString();
-  const inviteLink = `${config.customerInviteBaseUrl}?sessionId=${encodeURIComponent(sessionId)}&participantId=${encodeURIComponent(participantId)}`;
+  const baseInviteUrl = String(config.customerInviteBaseUrl || "").trim().replace(/\/+$/, "");
+  const roomLookup =
+    String(session?.metadata?.roomName || "").trim() ||
+    String(session?.externalRef || "").trim() ||
+    String(sessionId || "").trim();
+  const inviteLink = `${baseInviteUrl}/?sessionId=${encodeURIComponent(sessionId)}&roomName=${encodeURIComponent(roomLookup)}&participantId=${encodeURIComponent(participantId)}`;
   sessionStore.addInviteLink(sessionId, inviteLink);
   await readModel?.appendInviteLink(sessionId, inviteLink, sentAt);
   await readModel?.upsertSession(sessionStore.getSession(sessionId));
@@ -550,6 +559,29 @@ async function processReconnectTimeouts() {
         role,
         reason: "reconnect_timeout"
       });
+      
+      // Auto-stop recording if all participants have disconnected
+      const remainingParticipants = (sessionStore.listParticipants(sessionId) || []);
+      if (remainingParticipants.length === 0) {
+        try {
+          const result = await recordingService.stop(sessionId, "system_reconnect_timeout", {
+            onUpdate: async (recording) => {
+              await readModel?.saveRecording(recording);
+              const eventName = recording.state === "failed" ? "recording_failed" : "recording_stopped";
+              await eventBus.emit(eventName, { sessionId, recordingId: recording.recordingId, stoppedBy: "auto_all_disconnected", durationMs: recording.durationMs });
+            },
+            onUploadFinalize: async ({ recording, segmentDetails }) => {
+              if (!recordingPipelineService.isEnabled()) throw new Error("recording_s3_not_configured");
+              return await recordingPipelineService.finalizeAndTrigger({ recording, segmentDetails });
+            }
+          });
+          if (result.ok) {
+            console.log(`[recording] auto_stopped_all_disconnected sessionId=${sessionId}`);
+          }
+        } catch (_err) {
+          console.error(`[recording] auto_stop_failed sessionId=${sessionId} error=${_err.message}`);
+        }
+      }
     }
   } catch (error) {
     backendErrorsTotal.inc({ area: "reconnect_cleanup_worker" });

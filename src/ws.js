@@ -167,41 +167,53 @@ function setupWebSocketServer({
             send(ws, "error", { code: "session_not_found" }, requestId);
             return;
           }
-
-          await mediasoupService.ensureParticipant(claims.sid, claims.sub);
           const reconnectState = await reconnectStore.consumeReconnecting(claims.sid, claims.sub);
           const wasReconnecting = Boolean(reconnectState);
+          const existingParticipant = (sessionStore.listParticipants(claims.sid) || []).find(
+            (participant) => participant.participantId === claims.sub
+          );
+          const effectiveRole = existingParticipant?.role || claims.role;
+
+          if (wasReconnecting) {
+            // Tear down stale transports/producers from the old socket before
+            // the client creates fresh WebRTC resources after rejoin.
+            mediasoupService.closeParticipant(claims.sid, claims.sub);
+            if (recordingService?.releaseParticipantSegmentSlot) {
+              await recordingService.releaseParticipantSegmentSlot(claims.sid, claims.sub);
+            }
+          }
+          await mediasoupService.ensureParticipant(claims.sid, claims.sub);
           if (wasReconnecting) {
             reconnectSuccessTotal.inc();
           }
           sessionStore.upsertParticipant(claims.sid, {
             participantId: claims.sub,
-            role: claims.role,
+            role: effectiveRole,
             state: wasReconnecting ? "reconnected" : "connected"
           });
           ws.sessionId = claims.sid;
           ws.participantId = claims.sub;
-          ws.role = claims.role;
+          ws.role = effectiveRole;
           ws.rtpCapabilities = rtpCapabilities;
           addSocketToSession(claims.sid, ws);
           await eventBus.emit(wasReconnecting ? "participant_reconnected" : "participant_joined", {
             sessionId: claims.sid,
             participantId: claims.sub,
-            role: claims.role
+            role: effectiveRole
           });
           broadcastToSession(claims.sid, "participantPresence", {
             sessionId: claims.sid,
             participantId: claims.sub,
-            role: claims.role,
+            role: effectiveRole,
             state: wasReconnecting ? "reconnected" : "connected"
           });
           send(ws, "joined", {
             sessionId: claims.sid,
             participantId: claims.sub,
-            role: claims.role,
+            role: effectiveRole,
             routerRtpCapabilities: mediasoupService.getRouterRtpCapabilities(claims.sid)
           }, requestId);
-          console.log(`[ws] joined session=${claims.sid} participant=${claims.sub} role=${claims.role}`);
+          console.log(`[ws] joined session=${claims.sid} participant=${claims.sub} role=${effectiveRole}`);
           return;
         }
 
@@ -344,6 +356,29 @@ function setupWebSocketServer({
                 role: ws.role,
                 state: "left"
               });
+              
+              // Auto-stop recording if all participants have left
+              const remainingParticipants = (sessionStore.listParticipants(ws.sessionId) || []);
+              if (remainingParticipants.length === 0) {
+                try {
+                  const result = await recordingService.stop(ws.sessionId, ws.participantId, {
+                    onUpdate: async (recording) => {
+                      await readModel?.saveRecording(recording);
+                      const eventName = recording.state === "failed" ? "recording_failed" : "recording_stopped";
+                      await eventBus.emit(eventName, { sessionId: ws.sessionId, recordingId: recording.recordingId, stoppedBy: "auto_session_empty", durationMs: recording.durationMs });
+                    },
+                    onUploadFinalize: async ({ recording, segmentDetails }) => {
+                      if (!recordingPipelineService.isEnabled()) throw new Error("recording_s3_not_configured");
+                      return await recordingPipelineService.finalizeAndTrigger({ recording, segmentDetails });
+                    }
+                  });
+                  if (result.ok) {
+                    console.log(`[recording] auto_stopped_empty_session sessionId=${ws.sessionId}`);
+                  }
+                } catch (_err) {
+                  console.error(`[recording] auto_stop_failed sessionId=${ws.sessionId} error=${_err.message}`);
+                }
+              }
             }
           }
           send(ws, "left", {}, requestId);

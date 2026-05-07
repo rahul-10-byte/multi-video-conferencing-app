@@ -27,6 +27,7 @@ function deriveWsUrl(baseUrl) {
 }
 
 const baseUrl = process.env.VC_BASE_URL || "http://localhost:9000";
+const defaultCustomerInviteBaseUrl = `${String(baseUrl).replace(/\/+$/, "")}/`;
 
 const config = {
   port: intFromEnv("PORT", 9000),
@@ -43,7 +44,7 @@ const config = {
   reconnectCleanupPollSeconds: intFromEnv("VC_RECONNECT_CLEANUP_POLL_SECONDS", 2),
   reconnectCleanupBatchSize: intFromEnv("VC_RECONNECT_CLEANUP_BATCH_SIZE", 100),
   reconnectCleanupLockSeconds: intFromEnv("VC_RECONNECT_CLEANUP_LOCK_SECONDS", 30),
-  customerInviteBaseUrl: process.env.VC_CUSTOMER_INVITE_BASE_URL || "http://localhost:3000/vc/join",
+  customerInviteBaseUrl: process.env.VC_CUSTOMER_INVITE_BASE_URL || defaultCustomerInviteBaseUrl,
   db: {
     url: process.env.DATABASE_URL || "",
     ssl: (process.env.DATABASE_SSL || "false").toLowerCase() === "true",

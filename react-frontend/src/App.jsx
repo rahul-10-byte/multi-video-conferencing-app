@@ -1091,15 +1091,19 @@ export default function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const sessionId = params.get('sessionId');
+    const roomNameFromQuery = params.get('roomName');
     const inviteParticipantId = params.get('participantId');
     if (sessionId) {
-      setRoomName(sessionId);
+      // Invite links carry both `sessionId` and the original human `roomName`.
+      // Using `sessionId` as `roomName` causes "Create" to generate a new session.
+      if (roomNameFromQuery) setRoomName(roomNameFromQuery);
+      else setRoomName(sessionId);
       setRole('customer');
       if (inviteParticipantId) {
         setParticipantId(inviteParticipantId);
         setInviteCustomerId(inviteParticipantId);
       }
-      setJoinStatus(`Invite link detected for ${sessionId}`);
+      setJoinStatus(`Invite link detected for ${roomNameFromQuery || sessionId}`);
     }
   }, []);
 
@@ -1141,6 +1145,8 @@ export default function App() {
   }
 
   function resetMeetingState() {
+    const prevIntentionalLeave = intentionalLeaveRef.current;
+    console.log('[ui] resetMeetingState: begin', { prevIntentionalLeave });
     setConnected(false);
     setConnectionState('Disconnected');
     setSessionInfo(null);
@@ -1154,13 +1160,14 @@ export default function App() {
     setCallStartedAt(null);
     setRecordingStartedAt(null);
     setRecordingActive(false);
-    intentionalLeaveRef.current = false;
+    // Note: Do NOT reset intentionalLeaveRef here - it needs to remain true until onClose handler processes it
     lastJoinedParticipantIdRef.current = null;
     reconnectingRef.current = false;
     reconnectAttemptRef.current = 0;
     clearReconnectTimer();
     clearMediaTransportState();
     stopLocalMedia();
+    console.log('[ui] resetMeetingState: end', { intentionalLeaveRefNow: intentionalLeaveRef.current });
   }
 
   function canonicalRoomKey(room) {
@@ -1194,7 +1201,7 @@ export default function App() {
     return created.sessionId;
   }
 
-  async function issueJoinToken(sessionId, joinedParticipantId) {
+  async function issueJoinToken(sessionId, joinedParticipantId, joinedRole) {
     return requestJson(backendUrl, `/v1/sessions/${sessionId}/join-token`, {
       method: 'POST',
       body: {
@@ -1432,7 +1439,18 @@ export default function App() {
     const client = createSocketClient(joinToken.wsUrl || buildWsUrl(backendUrl));
     socketRef.current = client;
     client.onClose(() => {
-      if (intentionalLeaveRef.current || reconnectingRef.current) return;
+      console.log('[ws] onClose fired', {
+        intentionalLeaveRefNow: intentionalLeaveRef.current,
+        reconnectingRefNow: reconnectingRef.current,
+        sessionId,
+        participantId: joinedParticipantId,
+        role: joinedRole
+      });
+      if (intentionalLeaveRef.current || reconnectingRef.current) {
+        // Reset the intentional leave flag after we've processed it
+        intentionalLeaveRef.current = false;
+        return;
+      }
       setConnectionState('Reconnecting');
       reconnectingRef.current = true;
       clearMediaTransportState();
@@ -1514,7 +1532,7 @@ export default function App() {
         socketRef.current = null;
       }
       clearMediaTransportState();
-      const joinToken = await issueJoinToken(meta.sessionId, meta.participantId);
+      const joinToken = await issueJoinToken(meta.sessionId, meta.participantId, meta.role || role);
       await connectMeeting(joinToken, meta.sessionId, meta.participantId, meta.role, meta.roomName);
     } catch (_error) {
       clearReconnectTimer();
@@ -1530,6 +1548,33 @@ export default function App() {
       reconnectingRef.current = false;
       reconnectAttemptRef.current = 0;
       setJoinError('');
+      const params = new URLSearchParams(window.location.search);
+      const urlSessionId = params.get('sessionId');
+      const urlRoomName = params.get('roomName');
+
+      // If this is an invite link, join by `sessionId` directly.
+      // This avoids calling `/v1/sessions/resolve` with the wrong value
+      // (which causes `session_not_found` when `roomName` is absent).
+      if (urlSessionId) {
+        const joinedParticipantId = slugifyParticipantId(participantId || participantName);
+        setParticipantId(joinedParticipantId);
+        connectionMetaRef.current = {
+          sessionId: urlSessionId,
+          participantId: joinedParticipantId,
+          role,
+          roomName: urlRoomName || roomName || urlSessionId,
+        };
+        const joinToken = await issueJoinToken(urlSessionId, joinedParticipantId, role);
+        await connectMeeting(
+          joinToken,
+          urlSessionId,
+          joinedParticipantId,
+          role,
+          urlRoomName || roomName || urlSessionId
+        );
+        return;
+      }
+
       const canonicalRoomName = canonicalRoomKey(roomName);
       if (!canonicalRoomName) {
         setJoinError('room_name_required');
@@ -1548,7 +1593,7 @@ export default function App() {
         role,
         roomName: canonicalRoomName,
       };
-      const joinToken = await issueJoinToken(sessionId, joinedParticipantId);
+      const joinToken = await issueJoinToken(sessionId, joinedParticipantId, role);
       await connectMeeting(joinToken, sessionId, joinedParticipantId, role, canonicalRoomName);
     } catch (error) {
       setJoinError(error.message || 'failed_to_join');
@@ -1867,7 +1912,9 @@ export default function App() {
       activeParticipantId;
 
     try {
+      console.log('[ui] leaveMeeting: start', { sessionId, currentParticipantId, intentionalLeaveRefNow: intentionalLeaveRef.current });
       intentionalLeaveRef.current = true;
+      console.log('[ui] leaveMeeting: set intentionalLeaveRef=true');
       clearReconnectTimer();
       if (sessionId && currentParticipantId) {
         try {
@@ -1906,6 +1953,7 @@ export default function App() {
       setCameraFacing('front');
       setRecordingActive(false);
       resetMeetingState();
+      console.log('[ui] leaveMeeting: finally complete');
     }
   }
 
