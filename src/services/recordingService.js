@@ -39,26 +39,11 @@ class RecordingService {
     const recording = this.activeBySession.get(sessionId);
     if (!recording || recording._stopping) return;
 
-    // If this participant currently has an active segment, stop it now so
-    // their file ends when they leave instead of freezing to call end.
     const activeSegment = recording._segmentByParticipant.get(participantId);
-    if (activeSegment) {
-      try {
-        await this.stopFfmpeg(activeSegment.ffmpeg);
-      } catch (_e) {}
-      const sw = activeSegment.segmentWallClockStartMs;
-      if (Number.isFinite(sw)) {
-        activeSegment.sourceDurationMs = Math.max(0, Date.now() - sw);
-      }
-      for (const tap of activeSegment.taps || []) {
-        try { tap.consumer.close(); } catch (_e) {}
-        try { tap.transport.close(); } catch (_e) {}
-      }
-      try {
-        if (activeSegment.sdpFile) await fsp.unlink(activeSegment.sdpFile);
-      } catch (_e) {}
-    }
 
+    // Mutate slot state synchronously so an immediate rejoin sees the slot
+    // free. ffmpeg/tap/sdp teardown happens in the background — the HTTP
+    // leave response shouldn't wait on ffmpeg flushing its WebM trailer.
     recording._segmentByParticipant.delete(participantId);
     recording._segmentReleaseEpoch = (recording._segmentReleaseEpoch || 0) + 1;
     const pending = recording._pendingByParticipant.get(participantId);
@@ -70,6 +55,27 @@ class RecordingService {
     console.log(
       `[recording] segment_slot_released session=${sessionId} participant=${participantId} epoch=${recording._segmentReleaseEpoch}`
     );
+
+    if (!activeSegment) return;
+
+    const sw = activeSegment.segmentWallClockStartMs;
+    if (Number.isFinite(sw)) {
+      activeSegment.sourceDurationMs = Math.max(0, Date.now() - sw);
+    }
+    this.finalizeSegmentInBackground(activeSegment);
+  }
+
+  finalizeSegmentInBackground(activeSegment) {
+    (async () => {
+      try { await this.stopFfmpeg(activeSegment.ffmpeg); } catch (_e) {}
+      for (const tap of activeSegment.taps || []) {
+        try { tap.consumer.close(); } catch (_e) {}
+        try { tap.transport.close(); } catch (_e) {}
+      }
+      try {
+        if (activeSegment.sdpFile) await fsp.unlink(activeSegment.sdpFile);
+      } catch (_e) {}
+    })();
   }
 
   createProcess(binary, args) {
@@ -709,7 +715,7 @@ class RecordingService {
       "-use_wallclock_as_timestamps", "1",
       "-analyzeduration", "1000000",
       "-probesize", "1000000",
-      "-max_delay", "1000000",
+      "-max_delay", "200000",
       "-f", "sdp",
       "-i", sdpFile
     ];
