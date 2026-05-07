@@ -73,36 +73,43 @@ class RecordingService {
   }
 
   createProcess(binary, args) {
-    const proc = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const proc = spawn(binary, args, { stdio: ["pipe", "pipe", "pipe"] });
     let stderrTail = "";
     proc.stdout.on("data", () => {});
     proc.stderr.on("data", (chunk) => {
       stderrTail = `${stderrTail}${chunk.toString()}`.slice(-4000);
     });
+    proc.stdin.on("error", () => {});
     return { proc, getStderrTail: () => stderrTail };
   }
 
-  async stopFfmpeg(ffmpeg, timeoutMs = 4000) {
-    if (!ffmpeg || ffmpeg.exitCode !== null || ffmpeg.signalCode) return true;
-    ffmpeg.kill("SIGINT");
-    const exitedAfterSigint = await new Promise((resolve) => {
+  waitForExit(ffmpeg, timeoutMs) {
+    return new Promise((resolve) => {
       const timer = setTimeout(() => resolve(false), timeoutMs);
       ffmpeg.once("exit", () => {
         clearTimeout(timer);
         resolve(true);
       });
     });
-    if (exitedAfterSigint) return true;
+  }
+
+  async stopFfmpeg(ffmpeg) {
+    if (!ffmpeg || ffmpeg.exitCode !== null || ffmpeg.signalCode) return true;
+
+    // ffmpeg's keystroke loop checks stdin between iterations, so 'q' takes
+    // effect immediately — unlike SIGINT, which gets stuck behind the rtpdec
+    // -max_delay buffer when the source has stalled.
+    if (ffmpeg.stdin && !ffmpeg.stdin.destroyed) {
+      try { ffmpeg.stdin.write("q\n"); } catch (_e) {}
+      try { ffmpeg.stdin.end(); } catch (_e) {}
+    }
+    if (await this.waitForExit(ffmpeg, 1500)) return true;
+
+    ffmpeg.kill("SIGINT");
+    if (await this.waitForExit(ffmpeg, 1000)) return true;
 
     ffmpeg.kill("SIGTERM");
-    const exitedAfterSigterm = await new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(false), 1500);
-      ffmpeg.once("exit", () => {
-        clearTimeout(timer);
-        resolve(true);
-      });
-    });
-    if (exitedAfterSigterm) return true;
+    if (await this.waitForExit(ffmpeg, 500)) return true;
 
     ffmpeg.kill("SIGKILL");
     await new Promise((resolve) => ffmpeg.once("exit", () => resolve()));
